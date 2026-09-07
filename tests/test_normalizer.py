@@ -1,3 +1,5 @@
+import inspect
+import re
 import unittest
 
 from backend.normalizer import normalize
@@ -6,40 +8,40 @@ from backend.normalizer import normalize
 class NormalizeTests(unittest.TestCase):
     def assertAccepted(self, text, expected, **kwargs):
         result = normalize(text, **kwargs)
+        self.assertEqual(
+            {"accepted", "value", "reason", "changes"}, set(result), result
+        )
         self.assertTrue(result["accepted"], result)
         self.assertEqual(expected, result["value"])
         self.assertEqual("已接受", result["reason"])
         self.assertIsInstance(result["changes"], list)
+        self.assertRegex(result["value"], r"^[0-9]+$")
 
     def assertRejected(self, text, **kwargs):
         result = normalize(text, **kwargs)
+        self.assertEqual(
+            {"accepted", "value", "reason", "changes"}, set(result), result
+        )
         self.assertFalse(result["accepted"], result)
         self.assertEqual("", result["value"])
         self.assertTrue(result["reason"])
         self.assertIsInstance(result["changes"], list)
 
-    def test_repetition_and_spoken_letters(self):
-        for spoken in ("2个m", "两个m", "两个艾姆"):
-            with self.subTest(spoken=spoken):
-                self.assertAccepted(spoken, "mm")
+    def test_public_signature_is_digits_only(self):
+        self.assertEqual(
+            ["text", "min_length", "max_length"],
+            list(inspect.signature(normalize).parameters),
+        )
 
-    def test_repetition_is_distinct_from_plain_digit_and_letter(self):
-        self.assertAccepted("2m", "2m")
-
-    def test_explicit_letter_case(self):
-        self.assertAccepted("两个大写a", "AA")
-        self.assertAccepted("大写m小写m", "Mm")
-        self.assertAccepted("大写艾姆小写艾姆", "Mm")
-
-    def test_default_letter_case_is_lowercase(self):
-        result = normalize("ＡbＣ")
+    def test_ascii_and_fullwidth_digits(self):
+        self.assertAccepted("00129", "00129")
+        result = normalize("１２３０")
         self.assertTrue(result["accepted"], result)
-        self.assertEqual("abc", result["value"])
+        self.assertEqual("1230", result["value"])
         self.assertIn("已统一全角字符", result["changes"])
-        self.assertIn("已将未指定大小写的字母转为小写", result["changes"])
 
     def test_chinese_digit_sequence_preserves_leading_zeros(self):
-        self.assertAccepted("零〇幺二", "0012")
+        self.assertAccepted("零〇幺二两", "00122")
         self.assertAccepted("数字是零零八。", "008")
 
     def test_unambiguous_positional_numbers(self):
@@ -61,106 +63,137 @@ class NormalizeTests(unittest.TestCase):
             with self.subTest(spoken=spoken):
                 self.assertRejected(spoken)
 
-    def test_framing_terminal_punctuation_and_safe_spaces(self):
-        self.assertAccepted("口令是 两个 大写 A。", "AA")
-        self.assertAccepted("请输入 m 艾姆！", "mm")
-        self.assertAccepted("答案是abc?", "abc")
-
-    def test_realistic_mixed_asr_separators(self):
-        result = normalize("数字是二五八，两个 M")
-        self.assertTrue(result["accepted"], result)
-        self.assertEqual("258mm", result["value"])
-        self.assertIn("已将未指定大小写的字母转为小写", result["changes"])
-        self.assertAccepted("一，二，三", "123")
-        self.assertAccepted("一 二 三", "123")
-        self.assertAccepted("abc，def", "abcdef")
-
-    def test_spoken_symbols(self):
-        self.assertAccepted("a横杠b下划线c小数点d", "a-b_c.d")
-        self.assertAccepted("负号m", "-m")
-
-    def test_numeric_mode_allows_signed_decimal(self):
-        self.assertAccepted("负号零小数点五", "-0.5", mode="numeric")
-        self.assertAccepted("-12.50", "-12.50", mode="numeric")
-        result = normalize("数字是 1，2，3", mode="numbers")
-        self.assertTrue(result["accepted"], result)
-        self.assertEqual("123", result["value"])
-        self.assertIn("已将 numbers 模式按 numeric 处理", result["changes"])
-
-    def test_numeric_mode_rejects_non_numbers_and_bad_decimals(self):
-        for spoken in ("12m", "1.2.3", "--1", "负号负号一", ".5", "1."):
+    def test_safe_numeric_separators(self):
+        for spoken in ("12 34", "12，34", "12,34", "一 二 三", "1、2、3"):
             with self.subTest(spoken=spoken):
-                self.assertRejected(spoken, mode="numeric")
+                expected = re.sub(r"[\s,，、]", "", spoken)
+                if any(character in "一二三" for character in spoken):
+                    expected = "123"
+                self.assertAccepted(spoken, expected)
 
-    def test_alphanumeric_character_allowlist(self):
-        self.assertAccepted("aZ09_.-", "az09_.-")
-        for unsafe in ("abc/def", "a@b", "甲"):
-            with self.subTest(unsafe=unsafe):
-                self.assertRejected(unsafe)
+    def test_known_frames_optional_colon_and_terminal_punctuation(self):
+        cases = {
+            "口令是： 123。": "123",
+            "数字是:零零八！": "008",
+            "请输入 1 2 3": "123",
+            "答案是：九八七?": "987",
+            "输入：456；": "456",
+            "验证码是 2468。": "2468",
+        }
+        for spoken, expected in cases.items():
+            with self.subTest(spoken=spoken):
+                self.assertAccepted(spoken, expected)
 
-    def test_unrelated_chatter_prices_countdown_and_corrections_rejected(self):
-        samples = (
+    def test_repetition_expands_only_one_digit_atom(self):
+        cases = {
+            "两个零": "00",
+            "2个0": "00",
+            "三个八": "888",
+            "十个零": "0000000000",
+            "两个零，八": "008",
+            "两个零三个八": "00888",
+            "两个零 三个八": "00888",
+        }
+        for spoken, expected in cases.items():
+            with self.subTest(spoken=spoken):
+                self.assertAccepted(spoken, expected)
+
+    def test_repetition_count_supports_one_through_thirty_two(self):
+        self.assertAccepted("一个九", "9")
+        self.assertAccepted("三十二个零", "0" * 32, max_length=32)
+        for spoken in ("零个一", "33个0", "三十三个零"):
+            with self.subTest(spoken=spoken):
+                self.assertRejected(spoken, max_length=32)
+
+    def test_repetition_rejects_multidigit_or_nested_atoms(self):
+        for spoken in ("两个12", "两个一二", "两个零八", "两个三个八"):
+            with self.subTest(spoken=spoken):
+                self.assertRejected(spoken)
+
+    def test_english_digit_words_require_whole_word_boundaries(self):
+        self.assertAccepted("zero one two nine", "0129")
+        self.assertAccepted("数字是: seven, eight", "78")
+        for spoken in ("stone", "oneight", "zeroX", "Xone", "none"):
+            with self.subTest(spoken=spoken):
+                self.assertRejected(spoken)
+
+    def test_phone_readings_only_survive_an_entirely_numeric_payload(self):
+        self.assertAccepted("洞幺拐勾", "0179")
+        self.assertAccepted("验证码是 洞 1 拐 9", "0179")
+        self.assertAccepted("一个洞", "0")
+        for spoken in ("拐弯", "挂勾", "请拐7"):
+            with self.subTest(spoken=spoken):
+                self.assertRejected(spoken)
+
+    def test_letters_symbols_and_homophones_are_never_output(self):
+        for spoken in (
+            "O",
+            "I",
+            "l",
+            "S",
+            "abc",
+            "12m",
+            "两个m",
+            "艾姆",
+            "a横杠b",
+            "-12.5",
+            "负号一",
+            "一小数点五",
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertRejected(spoken)
+
+    def test_chatter_correction_negation_and_units_are_rejected(self):
+        for spoken in (
             "今天的口令是123",
+            "请帮我输入123",
             "价格是三块五",
+            "三块五",
+            "12元",
             "倒计时三二一",
             "口令不是123",
             "不对，应该是456",
             "输入123改成456",
-        )
-        for sample in samples:
-            with self.subTest(sample=sample):
-                self.assertRejected(sample)
-
-    def test_whole_payload_must_parse(self):
-        self.assertRejected("口令是abc谢谢")
-        self.assertRejected("请帮我输入123")
-
-    def test_numeric_separator_ambiguity_policy(self):
-        for spoken in ("1,234", "1，234", "1 234", "1,2,3"):
-            with self.subTest(spoken=spoken):
-                self.assertAccepted(spoken, spoken.replace(",", "").replace("，", "").replace(" ", ""), mode="numeric")
-        self.assertRejected("12,34", mode="numeric")
-        self.assertAccepted("数字是12,34", "1234", mode="numeric")
-
-    def test_filler_words_are_not_letter_aliases(self):
-        for filler in ("啊", "嗯", "爱"):
-            with self.subTest(filler=filler):
-                self.assertRejected(filler)
-        self.assertAccepted("阿尔艾姆", "rm")
-
-    def test_repetition_is_bounded_and_not_nested(self):
-        self.assertAccepted("九个m", "mmmmmmmmm")
-        self.assertAccepted("三个1", "111")
-        self.assertAccepted("两个横杠", "--")
-        for spoken in ("十个m", "零个m", "两个两个m", "一百个m"):
+            "123或456",
+            "123还是456",
+        ):
             with self.subTest(spoken=spoken):
                 self.assertRejected(spoken)
 
-    def test_raw_output_and_setting_bounds(self):
-        self.assertRejected("a" * 257)
-        self.assertRejected("a", min_length=0)
-        self.assertRejected("a", min_length=3, max_length=2)
-        self.assertRejected("a", max_length=65)
-        self.assertRejected("ab", max_length=1)
-        self.assertRejected("a", min_length=2)
+    def test_no_partial_extraction_padding_or_truncation(self):
+        for spoken in ("code 123", "123谢谢", "@123", "123/456"):
+            with self.subTest(spoken=spoken):
+                self.assertRejected(spoken)
+        self.assertRejected("12", min_length=3)
+        self.assertRejected("1234", max_length=3)
 
-    def test_invalid_types_and_modes_return_rejection(self):
+    def test_length_settings_are_restricted_to_one_through_thirty_two(self):
+        self.assertAccepted("1", "1", min_length=1, max_length=32)
+        for kwargs in (
+            {"min_length": 0},
+            {"max_length": 33},
+            {"min_length": 3, "max_length": 2},
+            {"min_length": True},
+            {"max_length": False},
+            {"min_length": 1.0},
+        ):
+            with self.subTest(kwargs=kwargs):
+                self.assertRejected("1", **kwargs)
+
+    def test_invalid_types_raw_limit_and_empty_payload_are_rejected(self):
         self.assertRejected(None)
-        self.assertRejected("1", mode="digits")
-        self.assertRejected("1", max_length=True)
+        self.assertRejected("1" * 257)
+        for spoken in ("", "   ", "口令是。", "验证码是："):
+            with self.subTest(spoken=spoken):
+                self.assertRejected(spoken)
 
-    def test_empty_payload_rejected(self):
-        for text in ("", "   ", "口令是。"):
-            with self.subTest(text=text):
-                self.assertRejected(text)
-
-    def test_reprocessing_applies_default_lowercase_policy(self):
-        for source in ("两个m", "大写m小写m", "零零一二", "a横杠b"):
+    def test_reprocessing_is_stable(self):
+        for source in ("两个零三个八", "一百零二", "１２３", "zero one"):
             first = normalize(source)
             self.assertTrue(first["accepted"], first)
             second = normalize(first["value"])
             self.assertTrue(second["accepted"], second)
-            self.assertEqual(first["value"].lower(), second["value"])
+            self.assertEqual(first["value"], second["value"])
 
 
 if __name__ == "__main__":

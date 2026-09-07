@@ -1,7 +1,7 @@
-"""Strict normalization for short, spoken input codes.
+"""Conservative normalization for spoken, digits-only input codes.
 
-The parser intentionally accepts only payloads it can account for in full.  It
-does not search a transcript for something that merely looks like a code.
+The parser accepts a transcript only when it can account for the whole payload.
+It never extracts a numeric-looking substring from otherwise unknown text.
 """
 
 import re
@@ -9,9 +9,9 @@ import unicodedata
 
 
 _RAW_MAX_LENGTH = 256
-_OUTPUT_MAX_LENGTH = 64
+_OUTPUT_MAX_LENGTH = 32
 
-_FRAMING = ("口令是", "数字是", "请输入", "答案是", "输入")
+_FRAMING = ("口令是", "数字是", "请输入", "答案是", "输入", "验证码是")
 _TERMINAL_PUNCTUATION = "。！？!?；;,，"
 _INLINE_SEPARATORS = frozenset(",，、")
 _CORRECTION_OR_NEGATION = (
@@ -27,6 +27,7 @@ _CORRECTION_OR_NEGATION = (
     "其实是",
     "或者",
     "还是",
+    "或",
 )
 
 _CHINESE_DIGITS = {
@@ -44,61 +45,53 @@ _CHINESE_DIGITS = {
     "八": 8,
     "九": 9,
 }
+_PHONE_DIGITS = {"洞": 0, "拐": 7, "勾": 9}
+_ENGLISH_DIGITS = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+}
 _CANONICAL_DIGITS = "零一二三四五六七八九"
 _SMALL_UNITS = {"十": 10, "百": 100, "千": 1000}
 _NUMBER_CHARACTERS = frozenset(_CHINESE_DIGITS) | frozenset("十百千万")
+_COUNT_CHARACTERS = _NUMBER_CHARACTERS
 
-# Only conventional multi-syllable names are accepted.  Common filler words
-# such as 啊、爱、嗯 must never become letters merely because they sound alike.
-_LETTER_ALIASES = {
-    "达不溜": "w",
-    "艾克斯": "x",
-    "贼德": "z",
-    "阿尔": "r",
-    "艾尔": "r",
-    "艾弗": "f",
-    "艾尺": "h",
-    "艾勒": "l",
-    "艾姆": "m",
-    "艾斯": "s",
-}
-_SORTED_ALIASES = tuple(sorted(_LETTER_ALIASES, key=len, reverse=True))
-_SPOKEN_SYMBOLS = {"下划线": "_", "小数点": ".", "横杠": "-", "负号": "-"}
-_SORTED_SYMBOLS = tuple(sorted(_SPOKEN_SYMBOLS, key=len, reverse=True))
-
-_ALPHANUMERIC_RE = re.compile(r"^[0-9A-Za-z_.-]+$")
-_NUMERIC_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
+_ASCII_DIGITS_RE = re.compile(r"^[0-9]+$")
+_ASCII_COUNT_RE = re.compile(r"[0-9]{1,3}")
+_ASCII_WORD_RE = re.compile(r"[A-Za-z]+")
 
 _REASON_TEXT = {
     "ok": "已接受",
     "invalid_text_type": "输入必须是文本",
-    "invalid_mode": "不支持的输入模式",
     "invalid_length_bounds": "长度设置无效",
     "raw_too_long": "原始文本过长",
     "correction_or_negation": "检测到否定或更正表达",
     "empty_payload": "未检测到口令内容",
-    "ambiguous_separator": "数字分隔方式有歧义",
-    "unrecognized_payload": "包含无法识别的内容",
     "ambiguous_number": "中文数字表达有歧义",
+    "ambiguous_repetition": "重复表达有歧义",
+    "unrecognized_payload": "包含无法识别的内容",
     "output_too_short": "规范化结果过短",
     "output_too_long": "规范化结果过长",
-    "invalid_numeric_value": "结果不是有效数字",
-    "invalid_alphanumeric_value": "结果包含不允许的字符",
+    "invalid_numeric_value": "结果不是有效数字口令",
 }
 
 _CHANGE_TEXT = {
-    "numbers_mode_normalized": "已将 numbers 模式按 numeric 处理",
     "unicode_normalized": "已统一全角字符",
     "outer_whitespace_removed": "已移除首尾空白",
     "terminal_punctuation_removed": "已移除句末标点",
     "framing_removed": "已移除口令提示语",
-    "separators_removed": "已移除字符间分隔符",
-    "explicit_case_applied": "已应用指定大小写",
-    "spoken_letters_converted": "已转换字母读音",
+    "separators_removed": "已移除数字间分隔符",
     "chinese_number_converted": "已转换中文数字",
-    "spoken_symbols_converted": "已转换口述符号",
+    "english_number_converted": "已转换英文数字词",
+    "phone_reading_converted": "已转换电话读法",
     "repetition_expanded": "已展开重复表达",
-    "case_normalized": "已将未指定大小写的字母转为小写",
 }
 
 
@@ -158,7 +151,9 @@ def _render_chinese_number(number):
 def _parse_positional_number(source):
     """Return an integer only when *source* is an unambiguous numeral."""
     normalized = "".join(
-        _CANONICAL_DIGITS[_CHINESE_DIGITS[char]] if char in _CHINESE_DIGITS else char
+        _CANONICAL_DIGITS[_CHINESE_DIGITS[char]]
+        if char in _CHINESE_DIGITS
+        else char
         for char in source
     )
     if normalized.count("万") > 1:
@@ -223,8 +218,6 @@ def _parse_positional_number(source):
     canonical = _render_chinese_number(value)
     if normalized == canonical:
         return value
-    # Speech recognizers sometimes preserve the explicit leading "一" in
-    # 一十/一十二; that form is still numerically unambiguous.
     if normalized.startswith("一十") and normalized[1:] == canonical:
         return value
     return None
@@ -237,171 +230,155 @@ def _parse_chinese_number(source):
     return None if value is None else str(value)
 
 
-def _match_letter(text, index):
-    char = text[index]
-    if char.isascii() and char.isalpha():
-        return char.lower(), index + 1, False
-    for alias in _SORTED_ALIASES:
-        if text.startswith(alias, index):
-            return _LETTER_ALIASES[alias], index + len(alias), True
-    return None
-
-
-def _is_inline_separator(char):
+def _is_separator(char):
     return char.isspace() or char in _INLINE_SEPARATORS
 
 
-def _ascii_digit_run_length(text, index, step):
-    length = 0
-    while 0 <= index < len(text) and text[index].isascii() and text[index].isdigit():
-        length += 1
-        index += step
-    return length
+def _is_word_character(char):
+    return char.isalnum() or char == "_"
 
 
-def _remove_safe_separators(text, changes, mode, framed):
-    output = []
-    index = 0
-    while index < len(text):
-        if not _is_inline_separator(text[index]):
-            output.append(text[index])
-            index += 1
-            continue
+def _match_english_digit(text, index):
+    match = _ASCII_WORD_RE.match(text, index)
+    if match is None:
+        return None
+    word = match.group(0).lower()
+    if word not in _ENGLISH_DIGITS:
+        return None
+    if index and _is_word_character(text[index - 1]):
+        return None
+    if match.end() < len(text) and _is_word_character(text[match.end()]):
+        return None
+    return str(_ENGLISH_DIGITS[word]), match.end()
 
-        start = index
-        while index < len(text) and _is_inline_separator(text[index]):
-            index += 1
-        previous = text[start - 1] if start else ""
-        following = text[index] if index < len(text) else ""
-        if not previous or not following:
+
+def _parse_count(source):
+    if source.isascii() and source.isdigit():
+        if len(source) > 1 and source.startswith("0"):
+            return None
+        value = int(source)
+    else:
+        if not any(char in _SMALL_UNITS or char == "万" for char in source):
+            if len(source) != 1 or source not in _CHINESE_DIGITS:
+                return None
+            value = _CHINESE_DIGITS[source]
+        else:
+            parsed = _parse_chinese_number(source)
+            if parsed is None:
+                return None
+            value = int(parsed)
+    return value if 1 <= value <= _OUTPUT_MAX_LENGTH else None
+
+
+def _count_phrase_end(text, index):
+    ascii_count = _ASCII_COUNT_RE.match(text, index)
+    if ascii_count is not None:
+        end = ascii_count.end()
+    else:
+        end = index
+        while end < len(text) and text[end] in _COUNT_CHARACTERS:
+            end += 1
+        if end == index:
             return None
 
-        if (
-            mode == "numeric"
-            and not framed
-            and previous.isascii()
-            and previous.isdigit()
-            and following.isascii()
-            and following.isdigit()
-        ):
-            left_length = _ascii_digit_run_length(text, start - 1, -1)
-            right_length = _ascii_digit_run_length(text, index, 1)
-            character_sequence = left_length == right_length == 1
-            thousands_group = 1 <= left_length <= 3 and right_length == 3
-            if not character_sequence and not thousands_group:
-                return None
+    while end < len(text) and text[end].isspace():
+        end += 1
+    return end + 1 if end < len(text) and text[end] == "个" else None
+
+
+def _starts_repetition(text, index):
+    return _count_phrase_end(text, index) is not None
+
+
+def _match_single_digit(text, index):
+    if index >= len(text):
+        return None
+    char = text[index]
+    if char.isascii() and char.isdigit():
+        return char, index + 1, None
+    if char in _CHINESE_DIGITS:
+        return str(_CHINESE_DIGITS[char]), index + 1, "chinese_number_converted"
+    if char in _PHONE_DIGITS:
+        return str(_PHONE_DIGITS[char]), index + 1, "phone_reading_converted"
+    english = _match_english_digit(text, index)
+    if english is not None:
+        value, end = english
+        return value, end, "english_number_converted"
+    return None
+
+
+def _parse_repetition(text, index, changes):
+    phrase_end = _count_phrase_end(text, index)
+    if phrase_end is None:
+        return None
+
+    count_source_end = phrase_end - 1
+    while count_source_end > index and text[count_source_end - 1].isspace():
+        count_source_end -= 1
+    count = _parse_count(text[index:count_source_end])
+    if count is None:
+        return False, index, "ambiguous_repetition"
+
+    atom_index = phrase_end
+    while atom_index < len(text) and text[atom_index].isspace():
+        atom_index += 1
+    atom = _match_single_digit(text, atom_index)
+    if atom is None:
+        return False, index, "ambiguous_repetition"
+    digit, atom_end, conversion = atom
+
+    if atom_end < len(text):
+        has_boundary = _is_separator(text[atom_end]) or _starts_repetition(
+            text, atom_end
+        )
+        if not has_boundary:
+            return False, index, "ambiguous_repetition"
+
+    if conversion is not None:
+        _add_change(changes, conversion)
+    if atom_index != phrase_end:
         _add_change(changes, "separators_removed")
-    return "".join(output)
+    _add_change(changes, "repetition_expanded")
+    return True, atom_end, digit * count
 
 
 def _parse_payload(text, changes):
     output = []
     index = 0
     while index < len(text):
-        # A repetition count is intentionally a single digit followed by 个.
-        count = None
-        count_end = index
-        if text[index].isascii() and text[index] in "123456789":
-            count = int(text[index])
-            count_end += 1
-        elif text[index] in _CHINESE_DIGITS and 1 <= _CHINESE_DIGITS[text[index]] <= 9:
-            count = _CHINESE_DIGITS[text[index]]
-            count_end += 1
-
-        if count is not None and text.startswith("个", count_end):
-            atom_index = count_end + 1
-            uppercase = None
-            if text.startswith("大写", atom_index):
-                uppercase = True
-                atom_index += 2
-            elif text.startswith("小写", atom_index):
-                uppercase = False
-                atom_index += 2
-            letter = _match_letter(text, atom_index) if atom_index < len(text) else None
-            if letter is not None:
-                value, atom_end, spoken = letter
-                if uppercase is not None:
-                    value = value.upper() if uppercase else value.lower()
-                    _add_change(changes, "explicit_case_applied")
-                if spoken:
-                    _add_change(changes, "spoken_letters_converted")
-                elif uppercase is None and text[atom_index] != value:
-                    _add_change(changes, "case_normalized")
-            elif uppercase is not None or atom_index >= len(text):
+        if _is_separator(text[index]):
+            if not output:
                 return None, "unrecognized_payload"
-            elif text[atom_index].isascii() and text[atom_index] in "0123456789_.-":
-                value = text[atom_index]
-                atom_end = atom_index + 1
-            elif text[atom_index] in _CHINESE_DIGITS:
-                value = str(_CHINESE_DIGITS[text[atom_index]])
-                atom_end = atom_index + 1
-                _add_change(changes, "chinese_number_converted")
-            else:
-                value = None
-                atom_end = atom_index
-                for symbol in _SORTED_SYMBOLS:
-                    if text.startswith(symbol, atom_index):
-                        value = _SPOKEN_SYMBOLS[symbol]
-                        atom_end += len(symbol)
-                        _add_change(changes, "spoken_symbols_converted")
-                        break
-                if value is None:
-                    return None, "unrecognized_payload"
-            output.append(value * count)
-            _add_change(changes, "repetition_expanded")
-            index = atom_end
-            continue
-
-        uppercase = None
-        if text.startswith("大写", index):
-            uppercase = True
-            index += 2
-        elif text.startswith("小写", index):
-            uppercase = False
-            index += 2
-        if uppercase is not None:
-            if index >= len(text):
+            end = index
+            while end < len(text) and _is_separator(text[end]):
+                end += 1
+            if end == len(text):
                 return None, "unrecognized_payload"
-            letter = _match_letter(text, index)
-            if letter is None:
-                return None, "unrecognized_payload"
-            value, index, spoken = letter
-            value = value.upper() if uppercase else value.lower()
-            output.append(value)
-            _add_change(changes, "explicit_case_applied")
-            if spoken:
-                _add_change(changes, "spoken_letters_converted")
+            _add_change(changes, "separators_removed")
+            index = end
             continue
 
-        symbol_matched = False
-        for symbol in _SORTED_SYMBOLS:
-            if text.startswith(symbol, index):
-                output.append(_SPOKEN_SYMBOLS[symbol])
-                index += len(symbol)
-                _add_change(changes, "spoken_symbols_converted")
-                symbol_matched = True
-                break
-        if symbol_matched:
+        repetition = _parse_repetition(text, index, changes)
+        if repetition is not None:
+            accepted, index, value_or_reason = repetition
+            if not accepted:
+                return None, value_or_reason
+            output.append(value_or_reason)
             continue
 
-        letter = _match_letter(text, index)
-        if letter is not None:
-            value, index, spoken = letter
-            output.append(value)
-            if spoken:
-                _add_change(changes, "spoken_letters_converted")
-            elif text[index - 1] != value:
-                _add_change(changes, "case_normalized")
+        char = text[index]
+        if char.isascii() and char.isdigit():
+            end = index + 1
+            while end < len(text) and text[end].isascii() and text[end].isdigit():
+                end += 1
+            output.append(text[index:end])
+            index = end
             continue
 
-        if text[index] in _NUMBER_CHARACTERS:
+        if char in _NUMBER_CHARACTERS:
             end = index + 1
             while end < len(text) and text[end] in _NUMBER_CHARACTERS:
-                if (
-                    text[end] in _CHINESE_DIGITS
-                    and 1 <= _CHINESE_DIGITS[text[end]] <= 9
-                    and text.startswith("个", end + 1)
-                ):
+                if _starts_repetition(text, end):
                     break
                 end += 1
             converted = _parse_chinese_number(text[index:end])
@@ -412,36 +389,33 @@ def _parse_payload(text, changes):
             index = end
             continue
 
-        char = text[index]
-        if char.isascii() and (char.isdigit() or char in "_.-"):
-            output.append(char)
+        if char in _PHONE_DIGITS:
+            output.append(str(_PHONE_DIGITS[char]))
+            _add_change(changes, "phone_reading_converted")
             index += 1
             continue
+
+        english = _match_english_digit(text, index)
+        if english is not None:
+            value, index = english
+            output.append(value)
+            _add_change(changes, "english_number_converted")
+            continue
+
         return None, "unrecognized_payload"
 
     return "".join(output), "ok"
 
 
-def normalize(
-    text: str,
-    mode: str = "alphanumeric",
-    min_length: int = 1,
-    max_length: int = 16,
-) -> dict:
-    """Normalize a short ASR payload into a conservatively parsed input code.
+def normalize(text: str, min_length: int = 1, max_length: int = 16) -> dict:
+    """Normalize a complete ASR payload into an ASCII digits-only code.
 
-    The return shape is stable for both accepted and rejected input.  Rejected
-    results always carry an empty value so callers cannot accidentally type a
-    partial parse.
+    Rejected results always carry an empty value so callers cannot type a
+    partial parse. Length bounds are inclusive and limited to 1 through 32.
     """
     changes = []
     if not isinstance(text, str):
         return _result(False, "", "invalid_text_type", changes)
-    if mode == "numbers":
-        mode = "numeric"
-        _add_change(changes, "numbers_mode_normalized")
-    if mode not in ("alphanumeric", "numeric"):
-        return _result(False, "", "invalid_mode", changes)
     if (
         isinstance(min_length, bool)
         or isinstance(max_length, bool)
@@ -471,34 +445,24 @@ def normalize(
         _add_change(changes, "terminal_punctuation_removed")
     normalized = without_punctuation.rstrip()
 
-    framed = False
     for prefix in _FRAMING:
         if normalized.startswith(prefix):
-            normalized = normalized[len(prefix) :]
+            normalized = normalized[len(prefix) :].lstrip()
+            if normalized.startswith(":"):
+                normalized = normalized[1:].lstrip()
             _add_change(changes, "framing_removed")
-            framed = True
             break
 
-    normalized = normalized.strip()
     if not normalized:
         return _result(False, "", "empty_payload", changes)
-
-    normalized = _remove_safe_separators(normalized, changes, mode, framed)
-    if normalized is None:
-        return _result(False, "", "ambiguous_separator", changes)
 
     value, reason = _parse_payload(normalized, changes)
     if value is None:
         return _result(False, "", reason, changes)
+    if not _ASCII_DIGITS_RE.fullmatch(value):
+        return _result(False, "", "invalid_numeric_value", changes)
     if len(value) < min_length:
         return _result(False, "", "output_too_short", changes)
     if len(value) > max_length:
         return _result(False, "", "output_too_long", changes)
-
-    if mode == "numeric":
-        if not _NUMERIC_RE.fullmatch(value):
-            return _result(False, "", "invalid_numeric_value", changes)
-    elif not _ALPHANUMERIC_RE.fullmatch(value):
-        return _result(False, "", "invalid_alphanumeric_value", changes)
-
     return _result(True, value, "ok", changes)

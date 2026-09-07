@@ -41,3 +41,16 @@ class SessionTests(unittest.TestCase):
             for value in ['[]', '{', '{"preview_only":"false"}', '{"max_length":true}', '{"min_length":20,"max_length":2}']:
                 path.write_text(value)
                 self.assertEqual(Settings(), load_settings(path))
+
+    def test_legacy_modes_cannot_restore_letters_or_discard_api_settings(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'settings.json'
+            for old_mode in ('alphanumeric', 'numeric', 'numbers'):
+                path.write_text('{"mode":"' + old_mode + '","model":"my-model","endpoint":"wss://example.test/api-ws/v1/inference","min_length":6,"max_length":6}')
+                settings = load_settings(path)
+                self.assertFalse(hasattr(settings, 'mode'))
+                self.assertEqual('my-model', settings.model)
+                self.assertEqual(6, settings.min_length)
+                self.assertEqual(6, settings.max_length)
+                save_settings(settings, path)
+                self.assertNotIn('"mode"', path.read_text())

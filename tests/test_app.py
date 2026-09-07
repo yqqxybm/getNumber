@@ -72,11 +72,11 @@ class AppTests(unittest.TestCase):
 
     def test_partial_never_writes_and_final_is_normalized_once(self):
         self.window.arm(); cloud = FakeCloud.instances[-1]
-        cloud.partial('两个 m'); self.qt.processEvents()
+        cloud.partial('两个零'); self.qt.processEvents()
         self.assertEqual([], self.target.writes)
-        cloud.final('两个 m 零零八'); self.qt.processEvents()
-        cloud.final('两个 m 零零八'); self.qt.processEvents()
-        self.assertEqual(['mm008'], self.target.writes)
+        cloud.final('两个零，八'); self.qt.processEvents()
+        cloud.final('两个零，八'); self.qt.processEvents()
+        self.assertEqual(['008'], self.target.writes)
         self.assertTrue(cloud.cancelled)
 
     def test_cancelled_callbacks_and_audio_cannot_enter_next_round(self):
@@ -104,9 +104,37 @@ class AppTests(unittest.TestCase):
         self.window.preview.setChecked(True)
         with patch('tingma.app.FocusTarget.capture', side_effect=AssertionError('must not capture')):
             self.window.arm()
-        FakeCloud.instances[-1].final('两个 m'); self.qt.processEvents()
-        self.assertEqual('mm', self.window.result.text())
+        FakeCloud.instances[-1].final('三个八'); self.qt.processEvents()
+        self.assertEqual('888', self.window.result.text())
         self.assertEqual([], self.target.writes)
+
+    def test_contaminated_or_non_integer_transcript_never_fills(self):
+        for text in ('12m3', '两个m', 'O08', '1.2', '负十二', '12或34', '不是123，是456'):
+            with self.subTest(text=text):
+                self.window.arm(); FakeCloud.instances[-1].final(text); self.qt.processEvents()
+                self.assertEqual([], self.target.writes)
+                self.assertFalse(self.window.copy.isEnabled())
+
+    def test_digit_gate_also_rejects_a_bad_normalizer_result(self):
+        for value in ('12a3', '１２', '١٢', '-12', '1.2', '', '1' * 17):
+            with self.subTest(value=value):
+                self.window.arm()
+                with patch('tingma.app.normalize', return_value={'accepted': True, 'value': value, 'reason': 'ok', 'changes': []}):
+                    FakeCloud.instances[-1].final('123'); self.qt.processEvents()
+                self.assertEqual([], self.target.writes)
+                self.assertFalse(self.window.copy.isEnabled())
+
+    def test_length_failure_does_not_pad_and_zeros_survive_valid_round(self):
+        self.window.minimum.setValue(6); self.window.maximum.setValue(6)
+        self.window.arm(); FakeCloud.instances[-1].final('0012'); self.qt.processEvents()
+        self.assertEqual([], self.target.writes)
+        self.window.arm(); FakeCloud.instances[-1].final('000012'); self.qt.processEvents()
+        self.assertEqual(['000012'], self.target.writes)
+
+    def test_identical_codes_in_distinct_user_rounds_are_not_deduplicated(self):
+        for _ in range(2):
+            self.window.arm(); FakeCloud.instances[-1].final('0008'); self.qt.processEvents()
+        self.assertEqual(['0008', '0008'], self.target.writes)
 
     def test_silence_finishes_streaming_clip_after_voice(self):
         self.window.arm(); token = self.window.gate.active_id; cloud = FakeCloud.instances[-1]

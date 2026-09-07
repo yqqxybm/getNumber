@@ -17,7 +17,6 @@ class Settings:
     protocol: str = 'dashscope_streaming'
     endpoint: str = PRESETS['dashscope_streaming'][1]
     model: str = PRESETS['dashscope_streaming'][2]
-    mode: str = 'alphanumeric'
     min_length: int = 1
     max_length: int = 16
     preview_only: bool = False
@@ -37,8 +36,8 @@ def load_settings(path=None):
         data = {key: value for key, value in data.items() if key in allowed}
         if data.get('protocol', 'dashscope_streaming') not in PRESETS:
             return Settings()
-        if data.get('mode', 'alphanumeric') not in ('alphanumeric', 'numeric'):
-            return Settings()
+        # Legacy mode fields are ignored by the field allowlist above. Numeric
+        # codes are the only supported output, without resetting API settings.
         for key in ('min_length', 'max_length'):
             if key in data and (type(data[key]) is not int or not 1 <= data[key] <= 32):
                 return Settings()

@@ -20,7 +20,7 @@ from .cloud_api import ApiConfig, ApiError, CloudSession, test_connection
 from .session import SessionGate, Endpoint
 from .settings import PRESETS, Settings, load_settings, save_settings
 from .windows_audio import LoopbackAudio
-from .windows_input import FocusTarget
+from .windows_input import FocusTarget, is_safe_insert_text
 
 
 STYLE = """
@@ -242,16 +242,20 @@ class MainWindow(QMainWindow):
         card = QFrame(); card.setObjectName('card'); body = QVBoxLayout(card); body.setContentsMargins(22, 18, 22, 18)
         self.result = QLabel('等待口令'); self.result.setObjectName('result'); self.result.setWordWrap(True); body.addWidget(self.result)
         self.original = QLabel('原话会显示在这里'); self.original.setObjectName('muted'); self.original.setWordWrap(True); body.addWidget(self.original)
-        self.reason = QLabel('“两个 m” → mm     “零零八” → 008'); self.reason.setWordWrap(True); body.addWidget(self.reason)
+        self.reason = QLabel('“两个零” → 00     “幺二三” → 123'); self.reason.setWordWrap(True); body.addWidget(self.reason)
         self.copy = QPushButton('复制结果'); self.copy.setEnabled(False); self.copy.clicked.connect(lambda: QApplication.clipboard().setText(self.result.text()))
         body.addWidget(self.copy, alignment=Qt.AlignmentFlag.AlignRight); layout.addWidget(card)
         options = QHBoxLayout()
-        self.mode = QComboBox(); self.mode.addItem('字母 + 数字', 'alphanumeric'); self.mode.addItem('仅数字', 'numeric')
-        self.mode.setCurrentIndex(self.mode.findData(self.settings.mode)); options.addWidget(self.mode)
-        options.addStretch(); options.addWidget(QLabel('长度'))
+        output_type = QLabel('纯数字口令 · 0–9'); options.addWidget(output_type)
+        options.addStretch(); options.addWidget(QLabel('位数'))
         self.minimum = QSpinBox(); self.minimum.setRange(1, 32); self.minimum.setValue(self.settings.min_length)
         self.maximum = QSpinBox(); self.maximum.setRange(1, 32); self.maximum.setValue(self.settings.max_length)
+        self.minimum.setAccessibleName('口令最少位数'); self.maximum.setAccessibleName('口令最多位数')
+        self.minimum.setToolTip('已知固定长度时，两端设为相同位数。前导零也占一位。')
+        self.maximum.setToolTip('长度不符会拒绝填写，不截断、不补零；前导零保留。')
         options.addWidget(self.minimum); options.addWidget(QLabel('至')); options.addWidget(self.maximum); layout.addLayout(options)
+        rules = QLabel('保留前导零；只展开明确的数字读法。字母、单位或歧义内容不自动填写。')
+        rules.setObjectName('muted'); rules.setWordWrap(True); layout.addWidget(rules)
         self.preview = QCheckBox('仅预览，不自动填入（建议第一次使用时开启）'); self.preview.setChecked(self.settings.preview_only); layout.addWidget(self.preview)
         controls = QHBoxLayout()
         self.prepare = QPushButton('准备系统声音'); self.prepare.setObjectName('primary'); self.prepare.clicked.connect(self._prepare_audio); controls.addWidget(self.prepare)
@@ -262,7 +266,7 @@ class MainWindow(QMainWindow):
         self.device = QLabel('Windows 10 / 11 · 采集电脑播放的声音'); self.device.setObjectName('muted'); self.device.setWordWrap(True); layout.addWidget(self.device)
         usage = QLabel('使用：打开直播 → 点中要填写的输入框 → 点击悬浮“我想要”或按 F8。\n每次只填一次，不按回车发送。切换输入框或编辑内容会取消本轮。')
         usage.setWordWrap(True); usage.setObjectName('muted'); layout.addWidget(usage)
-        trial = QHBoxLayout(); self.trial = QLineEdit(); self.trial.setPlaceholderText('试试纠错规则，如：两个 m 零零八'); trial.addWidget(self.trial)
+        trial = QHBoxLayout(); self.trial = QLineEdit(); self.trial.setPlaceholderText('试试：两个零，八 → 008'); self.trial.setAccessibleName('数字口令规则试算'); trial.addWidget(self.trial)
         try_button = QPushButton('试算'); try_button.clicked.connect(self._trial); trial.addWidget(try_button); layout.addLayout(trial)
         footer = QLabel('Key 仅保留到退出。只上传本轮短音频；识别服务按其规则计费。'); footer.setObjectName('eyebrow'); footer.setWordWrap(True); layout.addWidget(footer)
         for label in self.findChildren(QLabel):
@@ -278,7 +282,21 @@ class MainWindow(QMainWindow):
     def _read_options(self):
         if self.minimum.value() > self.maximum.value():
             raise ValueError('最短长度不能大于最长长度。')
-        return replace(self.settings, mode=self.mode.currentData(), min_length=self.minimum.value(), max_length=self.maximum.value(), preview_only=self.preview.isChecked())
+        return replace(self.settings, min_length=self.minimum.value(), max_length=self.maximum.value(), preview_only=self.preview.isChecked())
+
+    def _normalize_code(self, text, options):
+        parsed = normalize(text, min_length=options.min_length, max_length=options.max_length)
+        value = parsed.get('value')
+        if parsed.get('accepted') and (not is_safe_insert_text(value, options.max_length) or len(value) < options.min_length):
+            return {'accepted': False, 'value': '', 'reason': '结果未通过纯数字和位数校验，请重新识别。', 'changes': []}
+        return parsed
+
+    def _set_result(self, text):
+        # Keep long codes legible without adding display spaces that could be
+        # mistaken for part of the clipboard/input payload.
+        size = 44 if len(text) <= 14 else 32 if len(text) <= 22 else 23
+        self.result.setStyleSheet(f'font-size: {size}px;')
+        self.result.setText(text)
 
     def _settings(self):
         self.cancel('本轮已取消。') if self.gate.active_id else None
@@ -356,7 +374,7 @@ class MainWindow(QMainWindow):
             self.status.setText(str(error)); return
         token = self.gate.begin(); self.active_settings = options; self.target = target
         self.endpoint = Endpoint(); self.collecting = True
-        self.result.setText('正在听…'); self.original.setText('等待服务返回识别结果'); self.reason.setText('只处理这一次，最长收音 12 秒。'); self.copy.setEnabled(False)
+        self._set_result('正在听…'); self.original.setText('等待服务返回识别结果'); self.reason.setText('只处理这一次，最长收音 12 秒。'); self.copy.setEnabled(False)
         self.status.setText('正在听直播… ' + ('仅预览' if target is None else '目标：' + target.description))
         self._active_controls(True)
         self.cloud = CloudSession(config, lambda value: self.events.partial.emit(token, value), lambda value: self.events.final.emit(token, value), lambda value: self.events.error.emit(token, value))
@@ -372,7 +390,7 @@ class MainWindow(QMainWindow):
         self.cancel_button.setEnabled(active); self.finish_button.setEnabled(active)
         self.floating.set_active(active)
         self.floating.setText('取消本轮' if active else ('我想要  ·  F8' if sys.platform != 'win32' or self.floating._registered else '我想要'))
-        for field in (self.mode, self.minimum, self.maximum, self.preview):
+        for field in (self.minimum, self.maximum, self.preview):
             field.setEnabled(not active)
 
     def _drain_audio(self):
@@ -418,11 +436,11 @@ class MainWindow(QMainWindow):
         # Retire ownership BEFORE a write or any UI changes. No second callback
         # can write, even if the adapter or platform re-enters the event loop.
         self.gate.complete(token); self._stop_round()
-        parsed = normalize(text, options.mode, options.min_length, options.max_length)
+        parsed = self._normalize_code(text, options)
         self.original.setText('原话：' + text[:256])
         if not parsed['accepted']:
-            self.result.setText('未填入'); self.reason.setText(parsed['reason']); self.status.setText('没有得到明确口令，请重新听一轮。'); return
-        self.result.setText(parsed['value']); self.reason.setText('；'.join(parsed['changes']) or '格式检查通过')
+            self._set_result('未填入'); self.reason.setText(parsed['reason']); self.status.setText('没有得到明确的纯数字口令，请重新听一轮。'); return
+        self._set_result(parsed['value']); self.reason.setText(f"{len(parsed['value'])} 位数字 · " + ('；'.join(parsed['changes']) or '格式检查通过'))
         self.copy.setEnabled(True)
         if target is None:
             self.status.setText('预览完成。结果没有自动填入。'); return
@@ -451,7 +469,7 @@ class MainWindow(QMainWindow):
         was_active = self.gate.active_id is not None
         self.gate.cancel(); self._stop_round(); self.status.setText(message)
         if was_active:
-            self.result.setText('未填入'); self.copy.setEnabled(False)
+            self._set_result('未填入'); self.copy.setEnabled(False)
 
     def _trial(self):
         if self.gate.active_id:
@@ -460,9 +478,9 @@ class MainWindow(QMainWindow):
             options = self._read_options()
         except ValueError as error:
             self.status.setText(str(error)); return
-        parsed = normalize(self.trial.text(), options.mode, options.min_length, options.max_length)
-        self.original.setText('试算原话：' + self.trial.text()[:256]); self.result.setText(parsed['value'] if parsed['accepted'] else '无法确认')
-        self.reason.setText('；'.join(parsed['changes']) if parsed['accepted'] and parsed['changes'] else parsed['reason'])
+        parsed = self._normalize_code(self.trial.text(), options)
+        self.original.setText('试算原话：' + self.trial.text()[:256]); self._set_result(parsed['value'] if parsed['accepted'] else '无法确认')
+        self.reason.setText((f"{len(parsed['value'])} 位数字 · " + ('；'.join(parsed['changes']) or '格式检查通过')) if parsed['accepted'] else parsed['reason'])
         self.status.setText('规则试算，不调用 API，不自动填入。'); self.copy.setEnabled(parsed['accepted'])
 
     def closeEvent(self, event: QCloseEvent):

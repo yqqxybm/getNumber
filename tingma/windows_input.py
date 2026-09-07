@@ -16,7 +16,7 @@ import threading
 from typing import Optional, Tuple
 
 
-_SAFE_TEXT = re.compile(r"[A-Za-z0-9_.-]+\Z")
+_SAFE_TEXT = re.compile(r"[0-9]+\Z")
 _SUPPORTED_CONTROL_TYPES = frozenset(("EditControl", "DocumentControl"))
 
 
@@ -24,13 +24,14 @@ class InputError(RuntimeError):
     """Raised when the target cannot be identified or written safely."""
 
 
-def is_safe_insert_text(text: object, max_length: int = 64) -> bool:
-    """Return whether *text* is a bounded normalized code payload."""
+def is_safe_insert_text(text: object, max_length: int = 32) -> bool:
+    """Only ASCII digits may cross the input boundary, even without the UI."""
 
     return (
         isinstance(text, str)
         and not isinstance(max_length, bool)
         and isinstance(max_length, int)
+        and 1 <= max_length <= 32
         and 1 <= len(text) <= max_length
         and _SAFE_TEXT.fullmatch(text) is not None
     )

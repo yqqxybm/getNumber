@@ -67,10 +67,10 @@ class InputHelperTests(unittest.TestCase):
                     splice_utf16("A" + chr(0x1F600), start, end, "x")
 
     def test_insert_allowlist(self):
-        for value in ("abc", "A09-_.", "x" * 64):
+        for value in ("0", "008", "1234567890", "0" * 32):
             with self.subTest(value=value):
                 self.assertTrue(is_safe_insert_text(value))
-        for value in ("", "a b", "中文", "a/b", "x" * 65, None):
+        for value in ("", "abc", "12m3", "O08", "a b", "中文", "a/b", "1.2", "-12", "+12", "１２", "١٢", "1" * 33, None):
             with self.subTest(value=value):
                 self.assertFalse(is_safe_insert_text(value))
 
@@ -173,10 +173,10 @@ class FocusTargetTests(unittest.TestCase):
         target = FocusTarget._capture_with_backend(backend)
         self.assertEqual("Code (EditControl, PID 202)", target.description)
         self.assertIsNone(target.validate())
-        target.insert("Z9")
-        self.assertEqual(["abZ9cd"], backend.writes)
+        target.insert("09")
+        self.assertEqual(["ab09cd"], backend.writes)
         with self.assertRaisesRegex(InputError, "不能重复写入"):
-            target.insert("x")
+            target.insert("1")
 
     def test_value_focus_and_selection_changes_fail_closed(self):
         changes = (
@@ -190,14 +190,14 @@ class FocusTargetTests(unittest.TestCase):
                 backend = _FakeBackend([_snapshot(), _snapshot(**change)])
                 target = FocusTarget._capture_with_backend(backend)
                 with self.assertRaises(InputError):
-                    target.insert("x")
+                    target.insert("1")
                 self.assertEqual([], backend.writes)
 
     def test_change_at_final_write_boundary_fails_closed(self):
         backend = _FakeBackend([_snapshot(), _snapshot(), _snapshot(value="late")])
         target = FocusTarget._capture_with_backend(backend)
         with self.assertRaisesRegex(InputError, "写入前目标发生变化"):
-            target.insert("x")
+            target.insert("1")
         self.assertEqual([], backend.writes)
 
     def test_unknown_range_and_unsafe_text_are_rejected(self):
