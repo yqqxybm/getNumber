@@ -1,0 +1,13 @@
+.build/
+.venv/
+.codegraph/
+.codex/traces/
+__pycache__/
+.pytest_cache/
+*.pyc
+.DS_Store
+dist/
+.local/
+build/
+*.spec
+*.egg-info/

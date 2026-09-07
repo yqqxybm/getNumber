@@ -1,0 +1,11 @@
+# 听码项目约定
+
+- 目标平台已由用户明确为 Windows 10/11；用户随后明确改用官方云端 API 并自行填写配置。早期 Mac/MLX 假设已废弃。
+- 核心：Windows WASAPI 系统播放音频 → 云端 ASR → backend/normalizer.py → 点击时的目标输入框一次写入。
+- 不自动按回车发送；取消、超时、焦点/内容/选区变化后不能写入，旧结果必须隔离。
+- API Key 默认只存内存，不写配置/日志/命令行，不把真实密钥传入单元测试。
+- 配置在 UI 中填写提供商、API 地址、模型和 Key；测试连接不能上传当前系统录音。
+- 悬浮“我想要”按钮在 Windows 不激活窗口。云端请求必须有超时与取消，不累计工作队列。
+- Windows API 代码应可在其他平台导入以测试纯逻辑，但不能将模拟/非 Windows 测试声称为 Win 端到端验证。
+- 测试：`python -m unittest discover -s tests -v`；启动：`python -m tingma`；Windows安装/打包脚本在 scripts/。
+- .venv、.build、.local、.codegraph、dist、.codex/traces 不提交，不提交模型、录音、密钥或用户转写内容。
