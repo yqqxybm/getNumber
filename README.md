@@ -127,7 +127,13 @@ python -m unittest discover -s tests -v
 python -m tingma
 ```
 
-要生成免 Python 启动的程序，请在 **Windows** 中先运行软件完成依赖安装，关闭软件后执行 `scripts\build-windows.cmd`。脚本会运行测试并用 PyInstaller 生成 `dist\Tingma\Tingma.exe`；分发时复制整个 `Tingma` 文件夹。构建产物仍需在目标 Windows 环境验证。
+## 打包单文件 EXE
+
+Windows 本机打包：构建电脑安装 Python 3.12 x64 后，双击项目根目录的 **`打包EXE.cmd`**。不需要先打开听码或填写 API Key。脚本会创建环境、安装依赖、运行测试，再用 PyInstaller 生成单文件 **`dist\Tingma.exe`**。使用这个 EXE 的电脑不需要 Python，抖音模式仍需安装 Edge；单文件程序每次启动会先解压内置组件，需要稍等。
+
+云端打包：项目提供 `.github/workflows/windows-exe.yml`，可在 GitHub 私有仓库手动运行 **Actions → Build Windows EXE → Run workflow**。工作流在 Windows x64 上构建，成功后从本次运行的 Artifacts 下载 **Tingma-Windows-x64**，解压后打开 `Tingma.exe`。工作流不会因 push 自动运行，不需要 API Key，也不会连接抖音或发送弹幕。上传源码到 GitHub 和触发云构建需由仓库所有者授权；本地准备工作流并不表示已经上传或构建成功。
+
+两种方式均调用 `scripts/build_windows.py`。打包后实际启动 EXE 执行离线检查：Qt、Windows 音频依赖、音频转换、纯数字规则及内置浏览器驱动。只有检查通过才生成 `dist\windows-release` 交付目录，其中包含 EXE、说明、SHA256 和检查结果。**离线构建检查不证明真实直播/系统设备/付费 API/平台送达已经通过验收。** 当前开发宿主为 macOS，尚未在 Windows 构建环境执行这条打包链路。
 
 关键文件：`tingma/app.py` 为界面和流程，`tingma/cloud_api.py` 为云端协议，`tingma/windows_audio.py` 为系统声音，`tingma/windows_input.py` 为目标输入保护，`tingma/douyin.py` 为专用 Edge 与弹幕发送保护，`backend/normalizer.py` 为口令纠错。
 

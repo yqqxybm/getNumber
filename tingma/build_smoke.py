@@ -1,0 +1,44 @@
+"""Offline frozen-bundle check. No audio capture, API request or chat send."""
+from pathlib import Path
+import json
+import subprocess
+import sys
+
+
+def run(output):
+    result = {'ok': False, 'platform': sys.platform, 'frozen': bool(getattr(sys, 'frozen', False))}
+    try:
+        if sys.platform != 'win32' or not result['frozen']:
+            raise RuntimeError('This check must run inside the built Windows executable.')
+        import pyaudiowpatch  # noqa: F401
+        import uiautomation  # noqa: F401
+        from PySide6.QtWidgets import QApplication, QLineEdit
+        from playwright.sync_api import sync_playwright  # noqa: F401
+        from playwright._impl._driver import compute_driver_executable
+        from .app import MainWindow  # noqa: F401: validate all UI/runtime imports
+        from .windows_audio import _float32_to_pcm16
+        from backend.normalizer import normalize
+
+        qt = QApplication.instance() or QApplication([])
+        editor = QLineEdit()
+        normalized = normalize('两个零，八')
+        if not normalized['accepted'] or normalized['value'] != '008':
+            raise RuntimeError('Frozen numeric parser check failed.')
+        editor.setText(normalized['value']); qt.processEvents()
+        if editor.text() != '008':
+            raise RuntimeError('Frozen Qt plugin check failed.')
+        if len(_float32_to_pcm16(bytes(960 * 2 * 4), channels=2, sample_rate=48000)) != 640:
+            raise RuntimeError('Frozen audio conversion check failed.')
+        node, cli = compute_driver_executable()
+        if not Path(node).is_file() or not Path(cli).is_file():
+            raise RuntimeError('Bundled browser driver is missing.')
+        completed = subprocess.run([node, cli, '--version'], capture_output=True, text=True,
+                                   check=True, timeout=20, creationflags=subprocess.CREATE_NO_WINDOW)
+        if '1.62.0' not in completed.stdout:
+            raise RuntimeError('Bundled browser driver version check failed.')
+        editor.close()
+        result.update(ok=True, driver_version=completed.stdout.strip(), digits='008')
+    except Exception as error:
+        result['error'] = type(error).__name__ + ': ' + str(error)
+    Path(output).write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    return 0 if result['ok'] else 1
