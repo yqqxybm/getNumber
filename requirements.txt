@@ -1,6 +1,7 @@
 PySide6==6.10.2
 httpx[socks]==0.28.1
 websocket-client==1.8.0
+playwright==1.62.0
 numpy>=1.26,<3
 scipy>=1.12,<2
 PyAudioWPatch==0.2.12.8; sys_platform == 'win32'

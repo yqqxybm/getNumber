@@ -16,12 +16,12 @@ if errorlevel 1 goto failed
 echo 首次启动正在下载依赖，需要联网，可能需要几分钟…
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt
 if errorlevel 1 goto failed
-echo ready>".venv\tingma-ready"
+echo ready>".venv\tingma-ready-douyin-v1"
 :run
-if not exist ".venv\tingma-ready" (
+if not exist ".venv\tingma-ready-douyin-v1" (
   ".venv\Scripts\python.exe" -m pip install -r requirements.txt
   if errorlevel 1 goto failed
-  echo ready>".venv\tingma-ready"
+  echo ready>".venv\tingma-ready-douyin-v1"
 )
 ".venv\Scripts\python.exe" -m tingma
 if errorlevel 1 goto failed

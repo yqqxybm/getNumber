@@ -11,7 +11,7 @@ if not exist ".venv\Scripts\python.exe" (
 if errorlevel 1 goto failed
 ".venv\Scripts\python.exe" -m unittest discover -s tests -v
 if errorlevel 1 goto failed
-".venv\Scripts\python.exe" -m PyInstaller --noconfirm --clean --windowed --onedir --name Tingma --paths . --collect-all pyaudiowpatch --collect-all uiautomation scripts\windows_entry.py
+".venv\Scripts\python.exe" -m PyInstaller --noconfirm --clean --windowed --onedir --name Tingma --paths . --collect-all pyaudiowpatch --collect-all uiautomation --collect-all playwright scripts\windows_entry.py
 if errorlevel 1 goto failed
 echo 已生成 dist\Tingma\Tingma.exe，请复制整个 Tingma 文件夹到目标 Windows 电脑。
 pause

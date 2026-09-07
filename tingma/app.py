@@ -12,7 +12,7 @@ from PySide6.QtGui import QFont, QCloseEvent
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QLineEdit, QComboBox, QSpinBox, QCheckBox, QDialog,
-    QFormLayout, QDialogButtonBox, QFrame,
+    QFormLayout, QDialogButtonBox, QFrame, QScrollArea,
 )
 
 from backend.normalizer import normalize
@@ -21,6 +21,7 @@ from .session import SessionGate, Endpoint
 from .settings import PRESETS, Settings, load_settings, save_settings
 from .windows_audio import LoopbackAudio
 from .windows_input import FocusTarget, is_safe_insert_text
+from .douyin import DouyinBrowser, room_url
 
 
 STYLE = """
@@ -49,6 +50,7 @@ class Events(QObject):
     audio_ready = Signal(object, str)
     audio_error = Signal(str)
     connection = Signal(str, bool)
+    web = Signal(str, str, bool, str)
 
 
 class ApiDialog(QDialog):
@@ -227,15 +229,18 @@ class MainWindow(QMainWindow):
         self.gate = SessionGate(); self.cloud = None; self.audio = None
         self.target = None; self.active_settings = None; self.endpoint = Endpoint()
         self.collecting = False; self.preparing = False; self.closing = False
+        self.browser = None; self.web_cancel = None; self.pending_send = None
+        self.active_web = False; self.pending_config = None
         self.audio_queue = queue.Queue(maxsize=100)
         self.events = Events(self)
         self.events.partial.connect(self._partial); self.events.final.connect(self._final)
         self.events.error.connect(self._error); self.events.audio_ready.connect(self._audio_ready)
         self.events.audio_error.connect(self._audio_error)
-        self.setWindowTitle('听码 · 直播口令输入'); self.resize(590, 660)
-        central = QWidget(); self.setCentralWidget(central)
+        self.events.web.connect(self._web_event)
+        self.setWindowTitle('听码 · 直播口令输入'); self.resize(610, 800); self.setMinimumWidth(560)
+        central = QWidget(); scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(QFrame.Shape.NoFrame); scroll.setWidget(central); self.setCentralWidget(scroll)
         layout = QVBoxLayout(central); layout.setContentsMargins(28, 26, 28, 24); layout.setSpacing(16)
-        eyebrow = QLabel('系统声音 → 语音识别 → 当前输入框'); eyebrow.setObjectName('eyebrow'); layout.addWidget(eyebrow)
+        eyebrow = QLabel('系统声音 → 纯数字口令 → 输入 / 弹幕'); eyebrow.setObjectName('eyebrow'); layout.addWidget(eyebrow)
         header = QHBoxLayout(); title = QLabel('听码'); title.setObjectName('title'); header.addWidget(title); header.addStretch()
         self.api_button = QPushButton('API 设置'); self.api_button.clicked.connect(self._settings); header.addWidget(self.api_button); layout.addLayout(header)
         self.status = QLabel('先填写 API Key，再准备系统声音。'); self.status.setWordWrap(True); layout.addWidget(self.status)
@@ -257,6 +262,17 @@ class MainWindow(QMainWindow):
         rules = QLabel('保留前导零；只展开明确的数字读法。字母、单位或歧义内容不自动填写。')
         rules.setObjectName('muted'); rules.setWordWrap(True); layout.addWidget(rules)
         self.preview = QCheckBox('仅预览，不自动填入（建议第一次使用时开启）'); self.preview.setChecked(self.settings.preview_only); layout.addWidget(self.preview)
+        destination = QHBoxLayout(); destination.addWidget(QLabel('输出到'))
+        self.destination = QComboBox(); self.destination.addItem('当前输入框', 'input'); self.destination.addItem('抖音网页版弹幕', 'douyin')
+        destination.addWidget(self.destination); layout.addLayout(destination)
+        self.web_panel = QWidget(); web_layout = QVBoxLayout(self.web_panel); web_layout.setContentsMargins(0, 0, 0, 0)
+        room_row = QHBoxLayout(); self.room = QLineEdit(); self.room.setPlaceholderText('https://live.douyin.com/直播间编号'); self.room.setAccessibleName('抖音直播间链接')
+        room_row.addWidget(self.room); self.open_room = QPushButton('打开 Edge'); self.open_room.clicked.connect(self._open_room); room_row.addWidget(self.open_room); web_layout.addLayout(room_row)
+        self.auto_send = QCheckBox('识别后自动发送一条数字弹幕（每次启动需开启）'); web_layout.addWidget(self.auto_send)
+        self.web_note = QLabel('先打开专用 Edge 窗口并登录，保持目标直播间可见、弹幕框为空。'); self.web_note.setWordWrap(True); self.web_note.setObjectName('muted'); web_layout.addWidget(self.web_note)
+        self.ack_send = QPushButton('我已检查直播间，解除发送暂停'); self.ack_send.setEnabled(False); self.ack_send.clicked.connect(self._ack_send); web_layout.addWidget(self.ack_send)
+        layout.addWidget(self.web_panel); self.web_panel.hide()
+        self.destination.currentIndexChanged.connect(lambda: self.web_panel.setVisible(self.destination.currentData() == 'douyin'))
         controls = QHBoxLayout()
         self.prepare = QPushButton('准备系统声音'); self.prepare.setObjectName('primary'); self.prepare.clicked.connect(self._prepare_audio); controls.addWidget(self.prepare)
         self.show_float = QPushButton('显示悬浮按钮'); self.show_float.clicked.connect(self._show_float); controls.addWidget(self.show_float)
@@ -264,7 +280,7 @@ class MainWindow(QMainWindow):
         self.finish_button = QPushButton('这句说完了，立即识别'); self.finish_button.setEnabled(False); self.finish_button.clicked.connect(self._finish_audio); layout.addWidget(self.finish_button)
         self.finish_button.hide()  # Returning to this window changes the target focus.
         self.device = QLabel('Windows 10 / 11 · 采集电脑播放的声音'); self.device.setObjectName('muted'); self.device.setWordWrap(True); layout.addWidget(self.device)
-        usage = QLabel('使用：打开直播 → 点中要填写的输入框 → 点击悬浮“我想要”或按 F8。\n每次只填一次，不按回车发送。切换输入框或编辑内容会取消本轮。')
+        usage = QLabel('打开直播并播放 → 点击悬浮“我想要”或按 F8 听一轮。\n当前输入框模式需先点中输入框；抖音模式需开启自动发送。Esc 取消。')
         usage.setWordWrap(True); usage.setObjectName('muted'); layout.addWidget(usage)
         trial = QHBoxLayout(); self.trial = QLineEdit(); self.trial.setPlaceholderText('试试：两个零，八 → 008'); self.trial.setAccessibleName('数字口令规则试算'); trial.addWidget(self.trial)
         try_button = QPushButton('试算'); try_button.clicked.connect(self._trial); trial.addWidget(try_button); layout.addLayout(trial)
@@ -362,6 +378,8 @@ class MainWindow(QMainWindow):
         self.prepare.setText('重新准备系统声音'); self.prepare.setEnabled(sys.platform == 'win32' and not self.demo)
 
     def arm(self):
+        if self.pending_send:
+            self.cancel('已请求停止；若发送已提交，取消无法撤回弹幕。'); return
         if self.gate.active_id:
             self.cancel('本轮已取消。'); return
         try:
@@ -369,13 +387,26 @@ class MainWindow(QMainWindow):
             config = ApiConfig(options.protocol, options.endpoint, options.model, self.api_key).validate()
             if not self.audio:
                 raise ValueError('请先在主窗口“准备系统声音”。')
-            target = None if options.preview_only else FocusTarget.capture()
+            web = self.destination.currentData() == 'douyin' and not options.preview_only
+            if web and (not self.auto_send.isChecked() or self.browser is None):
+                raise ValueError('请先打开 Edge 直播间并开启“识别后自动发送”，或选择仅预览。')
+            url = room_url(self.room.text()) if web else None
+            target = None if options.preview_only or web else FocusTarget.capture()
         except Exception as error:
             self.status.setText(str(error)); return
         token = self.gate.begin(); self.active_settings = options; self.target = target
+        self.active_web = web; self._active_controls(True)
+        if web:
+            self.web_cancel = threading.Event(); self.pending_config = config
+            self.status.setText('正在检查直播间和弹幕框…'); self.deadline.start(5000)
+            self.browser.request('prepare', token, (self.web_cancel, url))
+            return
+        self._listen(token, config, '仅预览' if target is None else '目标：' + target.description)
+
+    def _listen(self, token, config, description):
         self.endpoint = Endpoint(); self.collecting = True
         self._set_result('正在听…'); self.original.setText('等待服务返回识别结果'); self.reason.setText('只处理这一次，最长收音 12 秒。'); self.copy.setEnabled(False)
-        self.status.setText('正在听直播… ' + ('仅预览' if target is None else '目标：' + target.description))
+        self.status.setText('正在听直播… ' + description)
         self._active_controls(True)
         self.cloud = CloudSession(config, lambda value: self.events.partial.emit(token, value), lambda value: self.events.final.emit(token, value), lambda value: self.events.error.emit(token, value))
         self.capture_timer.start(12000); self.deadline.start(35000); self.focus_timer.start()
@@ -390,8 +421,45 @@ class MainWindow(QMainWindow):
         self.cancel_button.setEnabled(active); self.finish_button.setEnabled(active)
         self.floating.set_active(active)
         self.floating.setText('取消本轮' if active else ('我想要  ·  F8' if sys.platform != 'win32' or self.floating._registered else '我想要'))
-        for field in (self.minimum, self.maximum, self.preview):
+        for field in (self.minimum, self.maximum, self.preview, self.destination, self.room, self.open_room, self.auto_send, self.api_button):
             field.setEnabled(not active)
+
+    def _open_room(self):
+        if self.demo or sys.platform != 'win32':
+            self.status.setText('请在 Windows 上打开专用 Edge 直播间。'); return
+        try:
+            url = room_url(self.room.text())
+        except ValueError as error:
+            self.status.setText(str(error)); return
+        if self.browser is None:
+            self.browser = DouyinBrowser(self.events.web.emit)
+        self.open_room.setEnabled(False); self.web_note.setText('正在打开 Edge…')
+        self.browser.request('open', payload=url)
+
+    def _ack_send(self):
+        if self.browser and not self.gate.active_id and not self.pending_send:
+            self.browser.request('acknowledge')
+
+    def _web_event(self, kind, token, ok, message):
+        if self.closing:
+            return
+        if kind == 'prepare':
+            if not self.gate.is_current(token):
+                return
+            if ok:
+                self._listen(token, self.pending_config, message)
+            else:
+                self.cancel(message)
+        elif kind == 'send':
+            if token != self.pending_send:
+                return
+            self.pending_send = None; self.web_cancel = None
+            self._active_controls(False); self.status.setText(message); self.web_note.setText(message)
+            self.ack_send.setEnabled(not ok and '状态不明' in message)
+        elif kind == 'open':
+            self.open_room.setEnabled(True); self.web_note.setText(message)
+        elif kind == 'acknowledge':
+            self.ack_send.setEnabled(False); self.status.setText(message); self.web_note.setText(message)
 
     def _drain_audio(self):
         # Bounded work preserves UI responsiveness even after a short UIA delay.
@@ -433,6 +501,7 @@ class MainWindow(QMainWindow):
         if not self.gate.is_current(token):
             return
         target, options = self.target, self.active_settings
+        web = self.active_web
         # Retire ownership BEFORE a write or any UI changes. No second callback
         # can write, even if the adapter or platform re-enters the event loop.
         self.gate.complete(token); self._stop_round()
@@ -442,6 +511,11 @@ class MainWindow(QMainWindow):
             self._set_result('未填入'); self.reason.setText(parsed['reason']); self.status.setText('没有得到明确的纯数字口令，请重新听一轮。'); return
         self._set_result(parsed['value']); self.reason.setText(f"{len(parsed['value'])} 位数字 · " + ('；'.join(parsed['changes']) or '格式检查通过'))
         self.copy.setEnabled(True)
+        if web:
+            self.pending_send = token; self._active_controls(True)
+            self.status.setText('正在向已绑定直播间提交一条数字弹幕…')
+            self.browser.request('send', token, parsed['value'])
+            return
         if target is None:
             self.status.setText('预览完成。结果没有自动填入。'); return
         try:
@@ -466,12 +540,19 @@ class MainWindow(QMainWindow):
     def cancel(self, message='本轮已取消。'):
         if not isinstance(message, str):  # QPushButton.clicked(bool)
             message = '本轮已取消。'
+        if self.web_cancel:
+            self.web_cancel.set()
+        if self.pending_send:
+            self.status.setText('已请求停止；若发送已提交，取消无法撤回弹幕。')
+            return
         was_active = self.gate.active_id is not None
         self.gate.cancel(); self._stop_round(); self.status.setText(message)
         if was_active:
             self._set_result('未填入'); self.copy.setEnabled(False)
 
     def _trial(self):
+        if self.pending_send:
+            self.status.setText('请等待本轮发送返回，再试算。'); return
         if self.gate.active_id:
             self.cancel('本轮已取消，正在试算纠错规则。')
         try:
@@ -487,6 +568,8 @@ class MainWindow(QMainWindow):
         self.closing = True; self.cancel(); self.floating.close(); self.drain.stop()
         if self.audio:
             self.audio.stop()
+        if self.browser:
+            self.browser.close()
         self.api_key = ''
         try:
             save_settings(self._read_options())

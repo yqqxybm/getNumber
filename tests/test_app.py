@@ -49,6 +49,13 @@ class FakeTarget:
         self.validate(); self.writes.append(text)
 
 
+class FakeBrowser:
+    def __init__(self): self.requests = []
+    def request(self, kind, token='', payload=None):
+        self.requests.append((kind, token, payload)); return True
+    def close(self): pass
+
+
 class AppTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -135,6 +142,73 @@ class AppTests(unittest.TestCase):
         for _ in range(2):
             self.window.arm(); FakeCloud.instances[-1].final('0008'); self.qt.processEvents()
         self.assertEqual(['0008', '0008'], self.target.writes)
+
+    def web_mode(self):
+        self.window.destination.setCurrentIndex(1)
+        self.window.room.setText('https://live.douyin.com/12345')
+        self.window.auto_send.setChecked(True)
+        self.window.browser = FakeBrowser()
+
+    def test_web_checks_target_before_asr_then_sends_only_final_once(self):
+        self.web_mode(); before = len(FakeCloud.instances)
+        with patch('tingma.app.FocusTarget.capture', side_effect=AssertionError('web uses bound DOM')):
+            self.window.arm()
+        token = self.window.gate.active_id
+        self.assertEqual(before, len(FakeCloud.instances))
+        self.assertEqual('prepare', self.window.browser.requests[0][0])
+        self.window._web_event('prepare', token, True, '已绑定直播间 12345')
+        cloud = FakeCloud.instances[-1]; cloud.partial('两个零'); self.qt.processEvents()
+        self.assertEqual(1, len(self.window.browser.requests))
+        cloud.final('两个零，八'); self.qt.processEvents()
+        cloud.final('008'); self.qt.processEvents()
+        self.assertEqual(('send', token, '008'), self.window.browser.requests[1])
+        self.assertEqual(2, len(self.window.browser.requests))
+        self.assertEqual([], self.target.writes)
+        self.assertFalse(self.window.destination.isEnabled())
+        self.window._web_event('send', token, True, '已提交一次')
+        self.assertIsNone(self.window.pending_send)
+        self.assertTrue(self.window.destination.isEnabled())
+
+    def test_web_cancelled_preflight_and_cloud_callbacks_do_not_send(self):
+        self.web_mode(); before = len(FakeCloud.instances); self.window.arm()
+        token = self.window.gate.active_id; event = self.window.web_cancel
+        self.window.cancel(); self.assertTrue(event.is_set())
+        self.window._web_event('prepare', token, True, '已绑定')
+        self.assertEqual(before, len(FakeCloud.instances))
+        self.window.arm(); token2 = self.window.gate.active_id
+        self.window._web_event('prepare', token2, True, '已绑定')
+        cloud = FakeCloud.instances[-1]; self.window.cancel(); cloud.final('008'); self.qt.processEvents()
+        self.assertTrue(all(kind != 'send' for kind, _, _ in self.window.browser.requests))
+
+    def test_web_preview_and_off_switch_cannot_send(self):
+        self.web_mode(); self.window.auto_send.setChecked(False)
+        before = len(FakeCloud.instances); self.window.arm()
+        self.assertIsNone(self.window.gate.active_id); self.assertEqual(before, len(FakeCloud.instances))
+        self.window.preview.setChecked(True); self.window.arm()
+        FakeCloud.instances[-1].final('008'); self.qt.processEvents()
+        self.assertEqual([], self.window.browser.requests); self.assertEqual([], self.target.writes)
+
+    def test_cancel_during_web_send_blocks_new_round_until_reply(self):
+        self.web_mode(); self.window.arm(); token = self.window.gate.active_id
+        self.window._web_event('prepare', token, True, '已绑定')
+        FakeCloud.instances[-1].final('008'); self.qt.processEvents()
+        event = self.window.web_cancel; self.window.arm()
+        self.assertTrue(event.is_set()); self.assertEqual(token, self.window.pending_send)
+        self.assertEqual(2, len(self.window.browser.requests))
+        self.window._web_event('send', token, False, '发送状态不明，已暂停')
+        self.assertTrue(self.window.ack_send.isEnabled()); self.assertIsNone(self.window.pending_send)
+        self.window._ack_send()
+        self.assertEqual('acknowledge', self.window.browser.requests[-1][0])
+
+    def test_web_invalid_recognition_and_failed_preflight_never_send(self):
+        self.web_mode(); self.window.arm(); token = self.window.gate.active_id
+        self.window._web_event('prepare', token, False, '请登录')
+        self.assertIsNone(self.window.gate.active_id)
+        self.window.arm(); token = self.window.gate.active_id
+        self.window._web_event('prepare', token, True, '已绑定')
+        FakeCloud.instances[-1].final('12m3'); self.qt.processEvents()
+        self.assertTrue(all(kind != 'send' for kind, _, _ in self.window.browser.requests))
+        self.assertTrue(self.window.auto_send.isEnabled())
 
     def test_silence_finishes_streaming_clip_after_voice(self):
         self.window.arm(); token = self.window.gate.active_id; cloud = FakeCloud.instances[-1]
