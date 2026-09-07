@@ -207,7 +207,7 @@ class FocusTargetTests(unittest.TestCase):
 
         backend = _FakeBackend([_snapshot()])
         target = FocusTarget._capture_with_backend(backend)
-        with self.assertRaisesRegex(InputError, "不安全"):
+        with self.assertRaises(InputError):
             target.insert("hello world")
         self.assertEqual([], backend.writes)
 

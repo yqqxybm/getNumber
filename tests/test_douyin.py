@@ -1,8 +1,9 @@
 """Browser state-machine tests. These do not launch Edge or send public chat."""
 import threading
 import unittest
+from unittest.mock import patch
 
-from tingma.douyin import EDITOR, READ_TEXT, RoomSender, DouyinError, room_url
+from tingma.douyin import EDITOR, READ_TEXT, RoomSender, DouyinBrowser, DouyinError, room_url
 
 
 class Element:
@@ -140,6 +141,50 @@ class DouyinTests(unittest.TestCase):
         self.prepare('new')
         with self.assertRaises(DouyinError): self.sender.send('old', '008')
         self.sender.send('new', '008'); self.assertEqual(1, self.page.button.clicks)
+
+
+class BrowserLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        self.events = []
+        with patch('tingma.douyin.threading.Thread'):
+            self.browser = DouyinBrowser(lambda *event: self.events.append(event))
+
+    def test_close_cancels_round_after_worker_consumed_target(self):
+        cancelled = threading.Event()
+        self.browser.request('prepare', 'round', (cancelled, 'https://live.douyin.com/12345'))
+        self.browser.sender.bound = None  # send() has already consumed the target.
+        self.browser.close()
+        self.assertTrue(cancelled.is_set())
+        self.assertTrue(self.browser.stopped.is_set())
+
+    def test_close_never_reads_worker_owned_target(self):
+        class UnreadableSender:
+            @property
+            def bound(self): raise AssertionError('worker owns bound target')
+        self.browser.sender = UnreadableSender()
+        self.browser.close(); self.browser.close()
+
+    def test_command_dequeued_during_close_is_not_executed(self):
+        def closing_get(**kwargs):
+            self.browser.close()
+            return 'open', '', 'https://live.douyin.com/12345'
+        with patch.object(self.browser.commands, 'get', side_effect=closing_get), patch.object(self.browser, '_open') as opening:
+            self.browser._run()
+        opening.assert_not_called()
+
+    def test_request_after_close_receives_failure_instead_of_waiting_forever(self):
+        self.browser.close()
+        self.assertFalse(self.browser.request('send', 'round', '008'))
+        self.assertEqual(('send', 'round', False), self.events[-1][:3])
+        self.assertTrue(self.browser.commands.empty())
+
+    def test_full_queue_keeps_current_round_cancellation(self):
+        first, rejected = threading.Event(), threading.Event()
+        self.browser.request('prepare', 'first', (first, 'https://live.douyin.com/12345'))
+        self.browser.request('acknowledge'); self.browser.request('acknowledge')
+        self.assertFalse(self.browser.request('prepare', 'rejected', (rejected, 'https://live.douyin.com/12345')))
+        self.browser.close()
+        self.assertTrue(first.is_set()); self.assertFalse(rejected.is_set())
 
 
 if __name__ == '__main__':

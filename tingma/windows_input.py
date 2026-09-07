@@ -135,7 +135,7 @@ class FocusTarget:
 
     def insert(self, text: str) -> None:
         if not is_safe_insert_text(text):
-            raise InputError("待写入内容不安全或超过 64 个字符")
+            raise InputError("待写入内容必须是 1–32 位纯数字")
         with self._lock:
             if self._used:
                 raise InputError("该输入目标已使用，不能重复写入")

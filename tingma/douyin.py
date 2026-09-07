@@ -179,6 +179,8 @@ class DouyinBrowser:
         self.callback = callback  # (kind, token, ok, message), Qt signal emitter
         self.commands = queue.Queue(maxsize=3)
         self.stopped = threading.Event()
+        self._lifecycle_lock = threading.Lock()
+        self._round_cancelled = None
         self.sender = RoomSender()
         self.context = None
         self.runtime = None
@@ -186,14 +188,20 @@ class DouyinBrowser:
         self.thread.start()
 
     def request(self, kind, token='', payload=None):
-        if self.stopped.is_set():
-            return False
-        try:
-            self.commands.put_nowait((kind, token, payload))
-            return True
-        except queue.Full:
-            self._emit(kind, token, False, '浏览器正在处理上一项操作，请稍后重试。')
-            return False
+        with self._lifecycle_lock:
+            if self.stopped.is_set():
+                error = '浏览器已关闭，本轮操作未执行。'
+            else:
+                try:
+                    self.commands.put_nowait((kind, token, payload))
+                except queue.Full:
+                    error = '浏览器正在处理上一项操作，请稍后重试。'
+                else:
+                    if kind == 'prepare':
+                        self._round_cancelled = payload[0]
+                    return True
+        self._emit(kind, token, False, error)
+        return False
 
     def _emit(self, kind, token, ok, message):
         try:
@@ -230,6 +238,8 @@ class DouyinBrowser:
                     kind, token, payload = self.commands.get(timeout=0.1)
                 except queue.Empty:
                     continue
+                if self.stopped.is_set():
+                    break
                 try:
                     if kind == 'open':
                         message = self._open(payload)
@@ -268,6 +278,10 @@ class DouyinBrowser:
                 self.runtime.stop()
 
     def close(self):
-        self.stopped.set()
-        if self.sender.bound:
-            self.sender.bound.cancelled.set()
+        # The worker consumes sender.bound before clicking. Retain the signal
+        # independently so closing never races a read of that mutable target.
+        with self._lifecycle_lock:
+            self.stopped.set()
+            cancelled = self._round_cancelled
+            if cancelled is not None:
+                cancelled.set()
