@@ -4,7 +4,11 @@
 
 默认模型为用户指定的官方 **`qwen-audio-3.0-asr-flash-streaming`**。在软件的“API 设置”中填写自己的 Key，也可以修改完整接口地址、模型和协议。Windows 电脑不需要本地运行大模型，不需要独立显卡。
 
-## 在 Windows 启动
+## 使用 Windows EXE
+
+下载成品包后先解压，双击 **`Tingma.exe`**。使用 EXE 不需要安装 Python。填写 API、准备系统声音、预览数字及发送抖音弹幕的操作见 [Windows 使用说明](docs/windows-user-guide.md)；该说明随成品包一起提供。
+
+## 从源码启动（开发者）
 
 1. 安装 [Python 3.12 的 64 位 Windows 版本](https://www.python.org/downloads/windows/)，保留安装程序中的 Python Launcher（`py`）。建议使用 Windows 10/11 的 x64 电脑。
 2. 解压完整项目到有写入权限的文件夹，例如“文档\听码”。不要直接在 ZIP 里运行。
@@ -114,11 +118,11 @@
 
 ## 验证状态
 
-本版本包含 Python 源码、Windows 启动脚本和 Windows 打包脚本。目前开发与测试在 macOS 上进行，测试使用模拟 API/目标控件，覆盖协议、纠错、取消、重复结果隔离、网页发送状态机和设置。Qt 界面可用 `python -m tingma --demo` 预览。
+本仓库包含 Python 源码、Windows 启动脚本和 Windows 打包脚本。2026-09-07 已在 [GitHub Windows x64 构建环境](https://github.com/yqqxybm/getNumber/actions/runs/34086884479) 生成单文件 EXE，并通过离线启动检查；运行的 90 项单元测试中，88 项通过，2 项仅适用于非 Windows 的检查按设计跳过。单元测试使用模拟 API/目标控件，覆盖协议、纠错、取消、重复结果隔离、网页发送状态机和设置。开发时可用 `python -m tingma --demo` 预览 Qt 界面。
 
 2026-09-07 在已登录的抖音公共直播间实际试填 `008` 并点击发送一次，输入框清空；消息区没有可验证回显，不能据此确认送达。程序采用的弹幕输入框和发送按钮定位均在此真实页面核对为唯一匹配。这次操作使用开发环境浏览器，**不等同于 Windows 程序的 Edge 驱动、系统录音、云 ASR、发送全链路联测**。
 
-**尚未在真实 Windows 播放设备、真实直播输入框与付费 API Key 的组合上完成端到端验证。** 此源码 ZIP 不等同于已验证的 Windows EXE。首次使用请先开启“仅预览”，并在普通文本框中检查填写行为。
+**尚未在真实 Windows 播放设备、真实直播输入框与付费 API Key 的组合上完成端到端验证。** EXE 的离线启动检查不替代实际直播联测。首次使用请先开启“仅预览”，并在普通文本框中检查填写行为。
 
 开发验证命令：
 
@@ -131,9 +135,9 @@ python -m tingma
 
 Windows 本机打包：构建电脑安装 Python 3.12 x64 后，双击项目根目录的 **`打包EXE.cmd`**。不需要先打开听码或填写 API Key。脚本会创建环境、安装依赖、运行测试，再用 PyInstaller 生成单文件 **`dist\Tingma.exe`**。使用这个 EXE 的电脑不需要 Python，抖音模式仍需安装 Edge；单文件程序每次启动会先解压内置组件，需要稍等。
 
-云端打包：项目提供 `.github/workflows/windows-exe.yml`，可在 GitHub 私有仓库手动运行 **Actions → Build Windows EXE → Run workflow**。工作流在 Windows x64 上构建，成功后从本次运行的 Artifacts 下载 **Tingma-Windows-x64**，解压后打开 `Tingma.exe`。工作流不会因 push 自动运行，不需要 API Key，也不会连接抖音或发送弹幕。上传源码到 GitHub 和触发云构建需由仓库所有者授权；本地准备工作流并不表示已经上传或构建成功。
+云端打包：项目提供 `.github/workflows/windows-exe.yml`，可在 GitHub 仓库手动运行 **Actions → Build Windows EXE → Run workflow**。工作流在 Windows x64 上构建，成功后从本次运行的 Artifacts 下载 **Tingma-Windows-x64**，解压后打开 `Tingma.exe`。工作流不会因 push 自动运行，不需要 API Key，也不会连接抖音或发送弹幕。
 
-两种方式均调用 `scripts/build_windows.py`。打包后实际启动 EXE 执行离线检查：Qt、Windows 音频依赖、音频转换、纯数字规则及内置浏览器驱动。只有检查通过才生成 `dist\windows-release` 交付目录，其中包含 EXE、说明、SHA256 和检查结果。**离线构建检查不证明真实直播/系统设备/付费 API/平台送达已经通过验收。** 当前开发宿主为 macOS，尚未在 Windows 构建环境执行这条打包链路。
+两种方式均调用 `scripts/build_windows.py`。打包后实际启动 EXE 执行离线检查：Qt、Windows 音频依赖、音频转换、纯数字规则及内置浏览器驱动。只有检查通过才生成 `dist\windows-release` 交付目录，其中包含 EXE、Windows 使用说明、SHA256 和检查结果。使用说明从 `docs/windows-user-guide.md` 复制，不将面向开发者的本 README 放入成品包。**离线构建检查不证明真实直播/系统设备/付费 API/平台送达已经通过验收。**
 
 关键文件：`tingma/app.py` 为界面和流程，`tingma/cloud_api.py` 为云端协议，`tingma/windows_audio.py` 为系统声音，`tingma/windows_input.py` 为目标输入保护，`tingma/douyin.py` 为专用 Edge 与弹幕发送保护，`backend/normalizer.py` 为口令纠错。
 

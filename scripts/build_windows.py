@@ -54,7 +54,7 @@ def main():
         shutil.rmtree(release)
     release.mkdir()
     shutil.copy2(executable, release / 'Tingma.exe')
-    shutil.copy2(ROOT / 'README.md', release / '使用说明.md')
+    shutil.copy2(ROOT / 'docs' / 'windows-user-guide.md', release / '使用说明.md')
     (release / 'build-check.json').write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     with executable.open('rb') as stream:
         digest = hashlib.file_digest(stream, 'sha256').hexdigest()
