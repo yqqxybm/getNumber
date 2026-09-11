@@ -12,6 +12,12 @@ _RAW_MAX_LENGTH = 256
 _OUTPUT_MAX_LENGTH = 32
 
 _FRAMING = ("口令是", "数字是", "请输入", "答案是", "输入", "验证码是")
+# Match instructions only at the start; the remaining payload must still parse
+# in full. The singular classifier belongs to the instruction, not the code.
+_LIVE_PROMPT_RE = re.compile(
+    r"(?:请\s*)?(?:大家\s*[,，]?\s*)?(?:飘|扣|打|发)\s*"
+    r"(?:(?:一|1)?\s*个\s*)?(?:数字\s*)?"
+)
 _TERMINAL_PUNCTUATION = "。！？!?；;,，"
 _INLINE_SEPARATORS = frozenset(",，、")
 _CORRECTION_OR_NEGATION = (
@@ -445,13 +451,22 @@ def normalize(text: str, min_length: int = 1, max_length: int = 16) -> dict:
         _add_change(changes, "terminal_punctuation_removed")
     normalized = without_punctuation.rstrip()
 
-    for prefix in _FRAMING:
-        if normalized.startswith(prefix):
-            normalized = normalized[len(prefix) :].lstrip()
-            if normalized.startswith(":"):
-                normalized = normalized[1:].lstrip()
-            _add_change(changes, "framing_removed")
-            break
+    live_prompt = _LIVE_PROMPT_RE.match(normalized)
+    framing_end = 0
+    if live_prompt:
+        framing_end = live_prompt.end()
+    else:
+        for prefix in _FRAMING:
+            if normalized.startswith(prefix):
+                framing_end = len(prefix)
+                break
+    if framing_end:
+        normalized = normalized[framing_end:].lstrip()
+        if normalized.startswith(":"):
+            normalized = normalized[1:].lstrip()
+        if live_prompt and normalized.endswith(("吧", "啊", "呀")):
+            normalized = normalized[:-1].rstrip()
+        _add_change(changes, "framing_removed")
 
     if not normalized:
         return _result(False, "", "empty_payload", changes)

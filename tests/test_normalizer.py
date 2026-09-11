@@ -98,6 +98,41 @@ class NormalizeTests(unittest.TestCase):
             with self.subTest(spoken=spoken):
                 self.assertAccepted(spoken, expected)
 
+    def test_live_prompts_separate_instruction_from_numeric_payload(self):
+        cases = {
+            "飘一个数字9": "9",
+            "飘一个数字九": "9",
+            "飘个9": "9",
+            "扣一个数字零零八": "008",
+            "打个数字一2三": "123",
+            "发数字００８": "008",
+            "请大家飘一个数字：9吧！": "9",
+            "大家，扣个九啊": "9",
+            "请 飘 1 个 数字 9": "9",
+            "飘1": "1",
+            "飘两个9": "99",
+            "扣三个八": "888",
+            "打数字两个零，八": "008",
+        }
+        for spoken, expected in cases.items():
+            with self.subTest(spoken=spoken):
+                self.assertAccepted(spoken, expected)
+                self.assertIn("已移除口令提示语", normalize(spoken)["changes"])
+
+    def test_live_prompts_do_not_extract_unrelated_or_ambiguous_numbers(self):
+        for spoken in (
+            "飘一个数字", "飘个", "飘吧", "飘一个数字9元",
+            "飘一个数字9.9", "飘一个数字O9", "飘一个数字两个m",
+            "不要飘一个数字9", "大家别飘9", "飘9或者8", "飘9改成8",
+            "倒计时3秒，飘一个数字9", "今天有9个人", "飘9再发8",
+            "飘一个数字9谢谢", "飘一个数字9可以吗", "飘两个12",
+            "飘两个数字9", "飘数字一百二", "9吧",
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertRejected(spoken)
+        self.assertRejected("飘一个数字9", min_length=2)
+        self.assertRejected("飘一个数字1234", max_length=3)
+
     def test_repetition_count_supports_one_through_thirty_two(self):
         self.assertAccepted("一个九", "9")
         self.assertAccepted("三十二个零", "0" * 32, max_length=32)

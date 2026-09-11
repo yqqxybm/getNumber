@@ -96,6 +96,25 @@ class AppTests(unittest.TestCase):
         second.final('456'); self.qt.processEvents()
         self.assertEqual(['456'], self.target.writes)
 
+    def test_live_prompt_final_fills_only_the_digits_once(self):
+        self.window.arm(); cloud = FakeCloud.instances[-1]
+        cloud.partial('飘一个数字9'); self.qt.processEvents()
+        self.assertEqual([], self.target.writes)
+        for _ in range(2):
+            cloud.final('飘一个数字9'); self.qt.processEvents()
+        self.assertEqual(['9'], self.target.writes)
+
+    def test_live_prompt_final_uses_the_same_digits_for_web_submission(self):
+        self.web_mode(); self.window.arm(); token = self.window.gate.active_id
+        self.window._web_event('prepare', token, True, '已绑定')
+        cloud = FakeCloud.instances[-1]
+        cloud.partial('扣一个数字零零八'); self.qt.processEvents()
+        self.assertEqual(1, len(self.window.browser.requests))
+        for _ in range(2):
+            cloud.final('扣一个数字零零八'); self.qt.processEvents()
+        self.assertEqual([('send', token, '008')], self.window.browser.requests[1:])
+        self.assertEqual([], self.target.writes)
+
     def test_changed_target_and_ambiguous_phrase_never_write(self):
         self.window.arm(); cloud = FakeCloud.instances[-1]
         self.target.changed = True
@@ -116,7 +135,8 @@ class AppTests(unittest.TestCase):
         self.assertEqual([], self.target.writes)
 
     def test_contaminated_or_non_integer_transcript_never_fills(self):
-        for text in ('12m3', '两个m', 'O08', '1.2', '负十二', '12或34', '不是123，是456'):
+        for text in ('12m3', '两个m', 'O08', '1.2', '负十二', '12或34', '不是123，是456',
+                     '飘一个数字9元', '不要飘一个数字9', '飘9或者8'):
             with self.subTest(text=text):
                 self.window.arm(); FakeCloud.instances[-1].final(text); self.qt.processEvents()
                 self.assertEqual([], self.target.writes)

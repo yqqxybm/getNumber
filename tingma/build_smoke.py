@@ -24,6 +24,9 @@ def run(output):
         normalized = normalize('两个零，八')
         if not normalized['accepted'] or normalized['value'] != '008':
             raise RuntimeError('Frozen numeric parser check failed.')
+        live_prompt = normalize('飘一个数字9')
+        if not live_prompt['accepted'] or live_prompt['value'] != '9':
+            raise RuntimeError('Frozen live prompt parser check failed.')
         editor.setText(normalized['value']); qt.processEvents()
         if editor.text() != '008':
             raise RuntimeError('Frozen Qt plugin check failed.')
@@ -37,7 +40,7 @@ def run(output):
         if '1.62.0' not in completed.stdout:
             raise RuntimeError('Bundled browser driver version check failed.')
         editor.close()
-        result.update(ok=True, driver_version=completed.stdout.strip(), digits='008')
+        result.update(ok=True, driver_version=completed.stdout.strip(), digits='008', live_prompt_digits='9')
     except Exception as error:
         result['error'] = type(error).__name__ + ': ' + str(error)
     Path(output).write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
