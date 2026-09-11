@@ -1,7 +1,9 @@
 """Conservative normalization for spoken, digits-only input codes.
 
-The parser accepts a transcript only when it can account for the whole payload.
-It never extracts a numeric-looking substring from otherwise unknown text.
+The parser accepts a transcript only when it can account for the whole numeric
+payload. An explicit ``扣`` or ``飘`` command may select that payload after
+unrelated livestream chatter; otherwise no numeric-looking substring is
+extracted from unknown text.
 """
 
 import re
@@ -15,11 +17,41 @@ _FRAMING = ("口令是", "数字是", "请输入", "答案是", "输入", "验�
 # Match instructions only at the start; the remaining payload must still parse
 # in full. The singular classifier belongs to the instruction, not the code.
 _LIVE_PROMPT_RE = re.compile(
-    r"(?:请\s*)?(?:大家\s*[,，]?\s*)?(?:飘|扣|打|发)\s*"
+    r"(?:请\s*)?(?:大家\s*[,，]?\s*)?(?:飘|扣(?!除)|打|发)\s*"
+    r"(?:[:,，]\s*)?"
     r"(?:(?:一|1)?\s*个\s*)?(?:数字\s*)?"
+    r"(?:[:,，]\s*)?"
 )
+_CUED_PROMPT_RE = re.compile(
+    r"(?<![折纽抵回克查])(?:飘|扣(?!除))\s*(?:[:,，]\s*)?"
+    r"(?:(?:一|1)?\s*个\s*)?(?:数字\s*)?(?:[:,，]\s*)?"
+    r"(?=[0-9零〇幺一二两三四五六七八九十百千万洞拐勾]|"
+    r"(?i:zero|one|two|three|four|five|six|seven|eight|nine))"
+)
+_RAW_CUED_PROMPT_RE = re.compile(r"(?<![折纽抵回克查])(?:飘|扣(?!除))")
+_MULTIPLICATION_RE = re.compile(r"乘以|乘|×|\*")
 _TERMINAL_PUNCTUATION = "。！？!?；;,，"
 _INLINE_SEPARATORS = frozenset(",，、")
+_CLAUSE_PUNCTUATION = "。！？!?；;,，"
+_COMMAND_NEGATION = (
+    "不要",
+    "别",
+    "不是",
+    "不对",
+    "不能",
+    "禁止",
+    "不用",
+    "无需",
+    "不必",
+    "不准",
+    "不可",
+    "取消",
+)
+_PURE_COMMAND_NEGATION_RE = re.compile(
+    r"(?:(?:请|大家)\s*)*"
+    r"(?:不要|别|不是|不对|不能|禁止|不用|无需|不必|不准|不可|取消|不)"
+)
+_PROMPT_ONLY_RE = re.compile(r"(?:(?:请|大家)\s*)*")
 _CORRECTION_OR_NEGATION = (
     "不是",
     "不对",
@@ -78,8 +110,10 @@ _REASON_TEXT = {
     "invalid_text_type": "输入必须是文本",
     "invalid_length_bounds": "长度设置无效",
     "raw_too_long": "原始文本过长",
+    "missing_live_command": "未检测到“扣”或“飘”口令",
     "correction_or_negation": "检测到否定或更正表达",
     "empty_payload": "未检测到口令内容",
+    "invalid_multiplication": "乘法口令不完整或有歧义",
     "ambiguous_number": "中文数字表达有歧义",
     "ambiguous_repetition": "重复表达有歧义",
     "unrecognized_payload": "包含无法识别的内容",
@@ -98,6 +132,7 @@ _CHANGE_TEXT = {
     "english_number_converted": "已转换英文数字词",
     "phone_reading_converted": "已转换电话读法",
     "repetition_expanded": "已展开重复表达",
+    "multiplication_evaluated": "已计算乘法口令",
 }
 
 
@@ -413,12 +448,57 @@ def _parse_payload(text, changes):
     return "".join(output), "ok"
 
 
-def normalize(text: str, min_length: int = 1, max_length: int = 16) -> dict:
-    """Normalize a complete ASR payload into an ASCII digits-only code.
+def _parse_numeric_expression(text, changes):
+    operators = list(_MULTIPLICATION_RE.finditer(text))
+    if not operators:
+        return _parse_payload(text, changes)
+    if len(operators) != 1:
+        return None, "invalid_multiplication"
 
-    Rejected results always carry an empty value so callers cannot type a
-    partial parse. Length bounds are inclusive and limited to 1 through 32.
-    """
+    operator = operators[0]
+    left_source = text[: operator.start()].strip()
+    right_source = text[operator.end() :].strip()
+    if not left_source or not right_source:
+        return None, "invalid_multiplication"
+    if _ASCII_WORD_RE.search(left_source) or _ASCII_WORD_RE.search(right_source):
+        return None, "unrecognized_payload"
+    if (
+        left_source != text[: operator.start()]
+        or right_source != text[operator.end() :]
+    ):
+        _add_change(changes, "separators_removed")
+
+    left, left_reason = _parse_payload(left_source, changes)
+    if left is None:
+        return None, left_reason
+    right, right_reason = _parse_payload(right_source, changes)
+    if right is None:
+        return None, right_reason
+
+    _add_change(changes, "multiplication_evaluated")
+    return str(int(left) * int(right)), "ok"
+
+
+def _is_negated_cue(text, cue_start):
+    clauses = re.split(
+        "[" + re.escape(_CLAUSE_PUNCTUATION) + "]", text[:cue_start]
+    )
+    command_context = clauses[-1].strip()
+    if any(marker in command_context for marker in _COMMAND_NEGATION):
+        return True
+    if command_context.endswith("不"):
+        return True
+    if not _PROMPT_ONLY_RE.fullmatch(command_context):
+        return False
+
+    for preceding_clause in reversed(clauses[:-1]):
+        preceding_clause = preceding_clause.strip()
+        if preceding_clause:
+            return _PURE_COMMAND_NEGATION_RE.fullmatch(preceding_clause) is not None
+    return False
+
+
+def _normalize(text, min_length, max_length, require_cue):
     changes = []
     if not isinstance(text, str):
         return _result(False, "", "invalid_text_type", changes)
@@ -443,19 +523,38 @@ def normalize(text: str, min_length: int = 1, max_length: int = 16) -> dict:
     if stripped != normalized:
         _add_change(changes, "outer_whitespace_removed")
     normalized = stripped
-    if any(marker in normalized for marker in _CORRECTION_OR_NEGATION):
-        return _result(False, "", "correction_or_negation", changes)
 
     without_punctuation = normalized.rstrip(_TERMINAL_PUNCTUATION)
     if without_punctuation != normalized:
         _add_change(changes, "terminal_punctuation_removed")
     normalized = without_punctuation.rstrip()
 
-    live_prompt = _LIVE_PROMPT_RE.match(normalized)
+    cued_prompts = list(_CUED_PROMPT_RE.finditer(normalized))
+    if len(cued_prompts) > 1:
+        return _result(False, "", "correction_or_negation", changes)
+
+    live_prompt = None
+    if cued_prompts:
+        live_prompt = cued_prompts[0]
+        if _is_negated_cue(normalized, live_prompt.start()):
+            return _result(False, "", "correction_or_negation", changes)
+    elif not require_cue:
+        live_prompt = _LIVE_PROMPT_RE.match(normalized)
+
+    if require_cue and live_prompt is None:
+        reason = (
+            "unrecognized_payload"
+            if _RAW_CUED_PROMPT_RE.search(normalized)
+            else "missing_live_command"
+        )
+        return _result(False, "", reason, changes)
+
     framing_end = 0
     if live_prompt:
         framing_end = live_prompt.end()
     else:
+        if any(marker in normalized for marker in _CORRECTION_OR_NEGATION):
+            return _result(False, "", "correction_or_negation", changes)
         for prefix in _FRAMING:
             if normalized.startswith(prefix):
                 framing_end = len(prefix)
@@ -468,10 +567,16 @@ def normalize(text: str, min_length: int = 1, max_length: int = 16) -> dict:
             normalized = normalized[:-1].rstrip()
         _add_change(changes, "framing_removed")
 
+    if any(marker in normalized for marker in _CORRECTION_OR_NEGATION):
+        return _result(False, "", "correction_or_negation", changes)
+
     if not normalized:
         return _result(False, "", "empty_payload", changes)
 
-    value, reason = _parse_payload(normalized, changes)
+    if cued_prompts:
+        value, reason = _parse_numeric_expression(normalized, changes)
+    else:
+        value, reason = _parse_payload(normalized, changes)
     if value is None:
         return _result(False, "", reason, changes)
     if not _ASCII_DIGITS_RE.fullmatch(value):
@@ -481,3 +586,17 @@ def normalize(text: str, min_length: int = 1, max_length: int = 16) -> dict:
     if len(value) > max_length:
         return _result(False, "", "output_too_long", changes)
     return _result(True, value, "ok", changes)
+
+
+def normalize(text: str, min_length: int = 1, max_length: int = 16) -> dict:
+    """Normalize a complete ASR payload into an ASCII digits-only code.
+
+    Rejected results always carry an empty value so callers cannot type a
+    partial parse. Length bounds are inclusive and limited to 1 through 32.
+    """
+    return _normalize(text, min_length, max_length, require_cue=False)
+
+
+def normalize_cued(text: str, min_length: int = 1, max_length: int = 16) -> dict:
+    """Normalize one explicit, non-negated ``扣`` or ``飘`` command."""
+    return _normalize(text, min_length, max_length, require_cue=True)

@@ -258,6 +258,49 @@ class _BurstRealtimeWebSocket:
 
 
 class CloudApiTests(unittest.TestCase):
+    def test_completed_segments_arrive_before_session_finish_and_can_cancel(self):
+        class RealtimeSegments(_RealtimeWebSocket):
+            def send(self, raw):
+                event = json.loads(raw); self.sent.append(event)
+                if event['type'] == 'session.update':
+                    self._messages.extend(json.dumps({
+                        'type': 'conversation.item.input_audio_transcription.completed',
+                        'transcript': text,
+                    }) for text in ('这件29。', '扣一个00。'))
+
+        class DashscopeSegments(_DashscopeWebSocket):
+            def send_binary(self, data):
+                self.binary.append(data)
+                task_id = self.controls[0]['header']['task_id']
+                self._messages.extend(json.dumps({
+                    'header': {'event': 'result-generated', 'task_id': task_id},
+                    'payload': {'output': {'sentence': {'text': text, 'sentence_end': True}}},
+                }) for text in ('这件29。', '扣一个00。'))
+
+        for protocol, ws in (('qwen_realtime', RealtimeSegments()), ('dashscope_streaming', DashscopeSegments())):
+            with self.subTest(protocol=protocol):
+                segments, unexpected = [], []
+                done = threading.Event()
+                def segment(text):
+                    segments.append(text)
+                    if len(segments) == 2:
+                        session.cancel(); done.set()
+                path = 'realtime' if protocol == 'qwen_realtime' else 'api-ws/v1/inference'
+                config = ApiConfig(protocol, 'wss://example.test/' + path, 'm', 'test-key')
+                with mock.patch('tingma.cloud_api._create_websocket', return_value=ws):
+                    session = CloudSession(config, unexpected.append, unexpected.append, unexpected.append, on_segment=segment)
+                    try:
+                        session.start()
+                        if protocol == 'dashscope_streaming':
+                            session.feed(b'\0' * 640)
+                        self.assertTrue(done.wait(1))
+                    finally:
+                        session.cancel(); session._thread.join(1)
+                self.assertEqual(['这件29。', '这件29。扣一个00。'], segments)
+                self.assertEqual([], unexpected)
+                self.assertTrue(ws.closed)
+                self.assertFalse(session._finishing)
+
     def test_config_is_frozen_validates_tls_and_hides_key(self):
         config = ApiConfig(
             endpoint="wss://workspace.example/api-ws/v1/realtime",

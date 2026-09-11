@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QFormLayout, QDialogButtonBox, QFrame, QScrollArea,
 )
 
-from backend.normalizer import normalize
+from backend.normalizer import normalize_cued
 from .cloud_api import ApiConfig, ApiError, CloudSession, test_connection
 from .session import SessionGate, Endpoint
 from .settings import PRESETS, Settings, load_settings, save_settings
@@ -45,6 +45,7 @@ QCheckBox { spacing: 7px; }
 
 class Events(QObject):
     partial = Signal(str, str)
+    segment = Signal(str, str)
     final = Signal(str, str)
     error = Signal(str, str)
     audio_ready = Signal(object, str)
@@ -234,6 +235,7 @@ class MainWindow(QMainWindow):
         self.audio_queue = queue.Queue(maxsize=100)
         self.events = Events(self)
         self.events.partial.connect(self._partial); self.events.final.connect(self._final)
+        self.events.segment.connect(self._segment)
         self.events.error.connect(self._error); self.events.audio_ready.connect(self._audio_ready)
         self.events.audio_error.connect(self._audio_error)
         self.events.web.connect(self._web_event)
@@ -247,7 +249,7 @@ class MainWindow(QMainWindow):
         card = QFrame(); card.setObjectName('card'); body = QVBoxLayout(card); body.setContentsMargins(22, 18, 22, 18)
         self.result = QLabel('等待口令'); self.result.setObjectName('result'); self.result.setWordWrap(True); body.addWidget(self.result)
         self.original = QLabel('原话会显示在这里'); self.original.setObjectName('muted'); self.original.setWordWrap(True); body.addWidget(self.original)
-        self.reason = QLabel('“两个零” → 00     “幺二三” → 123'); self.reason.setWordWrap(True); body.addWidget(self.reason)
+        self.reason = QLabel('“这件29，扣一个00” → 00'); self.reason.setWordWrap(True); body.addWidget(self.reason)
         self.copy = QPushButton('复制结果'); self.copy.setEnabled(False); self.copy.clicked.connect(lambda: QApplication.clipboard().setText(self.result.text()))
         body.addWidget(self.copy, alignment=Qt.AlignmentFlag.AlignRight); layout.addWidget(card)
         options = QHBoxLayout()
@@ -259,12 +261,19 @@ class MainWindow(QMainWindow):
         self.minimum.setToolTip('已知固定长度时，两端设为相同位数。前导零也占一位。')
         self.maximum.setToolTip('长度不符会拒绝填写，不截断、不补零；前导零保留。')
         options.addWidget(self.minimum); options.addWidget(QLabel('至')); options.addWidget(self.maximum); layout.addLayout(options)
-        rules = QLabel('保留前导零；只展开明确的数字读法。字母、单位或歧义内容不自动填写。')
+        rules = QLabel('只取“扣 / 飘”后的数字；保留前导零，明确乘法会计算。字母、单位或歧义内容不自动填写。')
         rules.setObjectName('muted'); rules.setWordWrap(True); layout.addWidget(rules)
         self.preview = QCheckBox('仅预览，不自动填入（建议第一次使用时开启）'); self.preview.setChecked(self.settings.preview_only); layout.addWidget(self.preview)
         destination = QHBoxLayout(); destination.addWidget(QLabel('输出到'))
-        self.destination = QComboBox(); self.destination.addItem('当前输入框', 'input'); self.destination.addItem('抖音网页版弹幕', 'douyin')
+        self.destination = QComboBox(); self.destination.addItem('当前输入框 · Ctrl+V 粘贴', 'input'); self.destination.addItem('抖音网页版弹幕', 'douyin')
         destination.addWidget(self.destination); layout.addLayout(destination)
+        self.input_panel = QWidget(); input_layout = QVBoxLayout(self.input_panel); input_layout.setContentsMargins(0, 0, 0, 0); input_layout.setSpacing(6)
+        self.input_target = QLabel('等待开始 · 先点中要粘贴的位置'); self.input_target.setWordWrap(True)
+        self.input_target.setAccessibleName('当前粘贴目标'); self.input_target.setStyleSheet('font-weight: 600; color: #637577;')
+        input_layout.addWidget(self.input_target)
+        input_note = QLabel('光标在微信，就粘贴到微信；在编辑器，就粘贴到编辑器。\n按 F8 或点悬浮按钮开始，保持目标不变。只粘贴一次，不按回车。')
+        input_note.setObjectName('muted'); input_note.setWordWrap(True); input_layout.addWidget(input_note)
+        layout.addWidget(self.input_panel)
         self.web_panel = QWidget(); web_layout = QVBoxLayout(self.web_panel); web_layout.setContentsMargins(0, 0, 0, 0)
         room_row = QHBoxLayout(); self.room = QLineEdit(); self.room.setPlaceholderText('https://live.douyin.com/直播间编号'); self.room.setAccessibleName('抖音直播间链接')
         room_row.addWidget(self.room); self.open_room = QPushButton('打开 Edge'); self.open_room.clicked.connect(self._open_room); room_row.addWidget(self.open_room); web_layout.addLayout(room_row)
@@ -273,6 +282,7 @@ class MainWindow(QMainWindow):
         self.ack_send = QPushButton('我已检查直播间，解除发送暂停'); self.ack_send.setEnabled(False); self.ack_send.clicked.connect(self._ack_send); web_layout.addWidget(self.ack_send)
         layout.addWidget(self.web_panel); self.web_panel.hide()
         self.destination.currentIndexChanged.connect(lambda: self.web_panel.setVisible(self.destination.currentData() == 'douyin'))
+        self.destination.currentIndexChanged.connect(lambda: self.input_panel.setVisible(self.destination.currentData() == 'input'))
         controls = QHBoxLayout()
         self.prepare = QPushButton('准备系统声音'); self.prepare.setObjectName('primary'); self.prepare.clicked.connect(self._prepare_audio); controls.addWidget(self.prepare)
         self.show_float = QPushButton('显示悬浮按钮'); self.show_float.clicked.connect(self._show_float); controls.addWidget(self.show_float)
@@ -282,7 +292,7 @@ class MainWindow(QMainWindow):
         self.device = QLabel('Windows 10 / 11 · 采集电脑播放的声音'); self.device.setObjectName('muted'); self.device.setWordWrap(True); layout.addWidget(self.device)
         usage = QLabel('打开直播并播放 → 点击悬浮“我想要”或按 F8 听一轮。\n当前输入框模式需先点中输入框；抖音模式需开启自动发送。Esc 取消。')
         usage.setWordWrap(True); usage.setObjectName('muted'); layout.addWidget(usage)
-        trial = QHBoxLayout(); self.trial = QLineEdit(); self.trial.setPlaceholderText('试试：两个零，八 → 008'); self.trial.setAccessibleName('数字口令规则试算'); trial.addWidget(self.trial)
+        trial = QHBoxLayout(); self.trial = QLineEdit(); self.trial.setPlaceholderText('试试：这件29，扣一个00 → 00'); self.trial.setAccessibleName('数字口令规则试算'); trial.addWidget(self.trial)
         try_button = QPushButton('试算'); try_button.clicked.connect(self._trial); trial.addWidget(try_button); layout.addLayout(trial)
         footer = QLabel('Key 仅保留到退出。只上传本轮短音频；识别服务按其规则计费。'); footer.setObjectName('eyebrow'); footer.setWordWrap(True); layout.addWidget(footer)
         for label in self.findChildren(QLabel):
@@ -301,7 +311,7 @@ class MainWindow(QMainWindow):
         return replace(self.settings, min_length=self.minimum.value(), max_length=self.maximum.value(), preview_only=self.preview.isChecked())
 
     def _normalize_code(self, text, options):
-        parsed = normalize(text, min_length=options.min_length, max_length=options.max_length)
+        parsed = normalize_cued(text, min_length=options.min_length, max_length=options.max_length)
         value = parsed.get('value')
         if parsed.get('accepted') and (not is_safe_insert_text(value, options.max_length) or len(value) < options.min_length):
             return {'accepted': False, 'value': '', 'reason': '结果未通过纯数字和位数校验，请重新识别。', 'changes': []}
@@ -313,6 +323,11 @@ class MainWindow(QMainWindow):
         size = 44 if len(text) <= 14 else 32 if len(text) <= 22 else 23
         self.result.setStyleSheet(f'font-size: {size}px;')
         self.result.setText(text)
+
+    def _set_input_target(self, text, *, state='active'):
+        color = {'active': '#087e79', 'idle': '#637577', 'error': '#a43732'}[state]
+        self.input_target.setStyleSheet(f'font-weight: 600; color: {color};')
+        self.input_target.setText(text)
 
     def _settings(self):
         self.cancel('本轮已取消。') if self.gate.active_id else None
@@ -391,7 +406,16 @@ class MainWindow(QMainWindow):
             if web and (not self.auto_send.isChecked() or self.browser is None):
                 raise ValueError('请先打开 Edge 直播间并开启“识别后自动发送”，或选择仅预览。')
             url = room_url(self.room.text()) if web else None
-            target = None if options.preview_only or web else FocusTarget.capture()
+            target = None
+            if options.preview_only:
+                self._set_input_target('仅预览 · 本轮不会粘贴到其他软件', state='idle')
+            elif not web:
+                try:
+                    target = FocusTarget.capture()
+                except Exception as error:
+                    self._set_input_target('未定位到粘贴目标：' + str(error), state='error')
+                    raise
+                self._set_input_target('本轮粘贴到：' + target.description)
         except Exception as error:
             self.status.setText(str(error)); return
         token = self.gate.begin(); self.active_settings = options; self.target = target
@@ -405,10 +429,10 @@ class MainWindow(QMainWindow):
 
     def _listen(self, token, config, description):
         self.endpoint = Endpoint(); self.collecting = True
-        self._set_result('正在听…'); self.original.setText('等待服务返回识别结果'); self.reason.setText('只处理这一次，最长收音 12 秒。'); self.copy.setEnabled(False)
+        self._set_result('正在听…'); self.original.setText('等待服务返回识别结果'); self.reason.setText('等待“扣 / 飘”后的完整数字或算式，最长收音 12 秒。'); self.copy.setEnabled(False)
         self.status.setText('正在听直播… ' + description)
         self._active_controls(True)
-        self.cloud = CloudSession(config, lambda value: self.events.partial.emit(token, value), lambda value: self.events.final.emit(token, value), lambda value: self.events.error.emit(token, value))
+        self.cloud = CloudSession(config, lambda value: self.events.partial.emit(token, value), lambda value: self.events.final.emit(token, value), lambda value: self.events.error.emit(token, value), on_segment=lambda value: self.events.segment.emit(token, value))
         self.capture_timer.start(12000); self.deadline.start(35000); self.focus_timer.start()
         try:
             self.cloud.start()
@@ -474,7 +498,9 @@ class MainWindow(QMainWindow):
                     self.cloud.feed(pcm)
                 except ApiError as error:
                     self.cancel(str(error)); return
-                if self.endpoint.ended:
+                # Streaming ASR owns sentence boundaries. A sales-price pause
+                # must not cut off the later 扣/飘 command; HTTP needs a clip.
+                if self.endpoint.ended and self.active_settings.protocol not in ('qwen_realtime', 'dashscope_streaming'):
                     self._finish_audio()
 
     def _finish_audio(self):
@@ -489,6 +515,17 @@ class MainWindow(QMainWindow):
     def _partial(self, token, text):
         if self.gate.is_current(token):
             self.original.setText('识别中：' + text[:256])
+
+    def _segment(self, token, text):
+        """Complete on a provider-final cue sentence, not an interim guess."""
+        if not self.gate.is_current(token):
+            return
+        options = self.active_settings
+        parsed = self._normalize_code(text, options)
+        if parsed['accepted']:
+            # _final retires the token and stops audio/network before the write.
+            # Waiting for session.finished would keep recording later chatter.
+            self._final(token, text)
 
     def _check_focus(self):
         if self.gate.active_id and self.target:
@@ -508,7 +545,9 @@ class MainWindow(QMainWindow):
         parsed = self._normalize_code(text, options)
         self.original.setText('原话：' + text[:256])
         if not parsed['accepted']:
-            self._set_result('未填入'); self.reason.setText(parsed['reason']); self.status.setText('没有得到明确的纯数字口令，请重新听一轮。'); return
+            if target is not None:
+                self._set_input_target('未粘贴 · 本轮口令未通过检查', state='error')
+            self._set_result('未填入'); self.reason.setText(parsed['reason']); self.status.setText('没有得到明确的“扣 / 飘 + 数字”口令，请重新听一轮。'); return
         self._set_result(parsed['value']); self.reason.setText(f"{len(parsed['value'])} 位数字 · " + ('；'.join(parsed['changes']) or '格式检查通过'))
         self.copy.setEnabled(True)
         if web:
@@ -520,8 +559,10 @@ class MainWindow(QMainWindow):
             self.status.setText('预览完成。结果没有自动填入。'); return
         try:
             target.insert(parsed['value'])
-            self.status.setText('已填入一次，请检查内容。没有按回车发送。')
+            self._set_input_target('已执行一次 Ctrl+V：' + target.description)
+            self.status.setText('已执行一次粘贴，请在目标软件检查。没有按回车；数字保留在剪贴板。')
         except Exception as error:
+            self._set_input_target('未确认粘贴 · ' + str(error), state='error')
             self.status.setText('未自动填入：' + str(error))
 
     def _error(self, token, message):
@@ -546,6 +587,8 @@ class MainWindow(QMainWindow):
             self.status.setText('已请求停止；若发送已提交，取消无法撤回弹幕。')
             return
         was_active = self.gate.active_id is not None
+        if was_active and self.target is not None:
+            self._set_input_target('本轮粘贴已取消：' + message, state='idle')
         self.gate.cancel(); self._stop_round(); self.status.setText(message)
         if was_active:
             self._set_result('未填入'); self.copy.setEnabled(False)

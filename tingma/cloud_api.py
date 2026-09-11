@@ -135,11 +135,16 @@ class CloudSession:
         on_partial: Callable[[str], Any],
         on_final: Callable[[str], Any],
         on_error: Callable[[str], Any],
+        *,
+        on_segment: Callable[[str], Any] | None = None,
     ) -> None:
         self.config = config
         self.on_partial = on_partial
         self.on_final = on_final
         self.on_error = on_error
+        # Only provider-committed sentences reach this callback, never a stash
+        # or interim hypothesis. The consumer may finish its one-shot workflow.
+        self.on_segment = on_segment
 
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
@@ -335,6 +340,8 @@ class CloudSession:
                     transcript = event.get("transcript")
                     if isinstance(transcript, str):
                         completed.append(transcript)
+                        if self.on_segment is not None:
+                            self._invoke_callback(self.on_segment, "".join(completed))
                 elif event_type == "session.finished":
                     if not finish_sent:
                         raise ApiError("云端实时接口提前结束了会话")
@@ -427,6 +434,8 @@ class CloudSession:
                         raise ApiError("DashScope 流式结果缺少转写文本")
                     if sentence.get("sentence_end") is True:
                         completed.append(text)
+                        if self.on_segment is not None:
+                            self._invoke_callback(self.on_segment, "".join(completed))
                     else:
                         self._invoke_callback(self.on_partial, "".join(completed) + text)
                 elif event_type == "task-finished":
