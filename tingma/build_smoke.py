@@ -19,7 +19,7 @@ def run(output):
         from .app import MainWindow  # noqa: F401: validate all UI/runtime imports
         from .windows_audio import _float32_to_pcm16
         from .windows_input import _QtClipboard, _WinApi
-        from backend.normalizer import normalize_cued
+        from backend.normalizer import normalize_cued, has_cued_payload_boundary
 
         qt = QApplication.instance() or QApplication([])
         editor = QLineEdit()
@@ -38,6 +38,9 @@ def run(output):
         product = normalize_cued('这件30扣一个2乘3')
         if not product['accepted'] or product['value'] != '6':
             raise RuntimeError('Frozen multiplication check failed.')
+        for spoken, expected in (('29一件飘一个9全羊毛', '9'), ('扣2加3乘4全羊毛', '14'), ('飘9除3减1全羊毛', '2')):
+            if normalize_cued(spoken)['value'] != expected or not has_cued_payload_boundary(spoken):
+                raise RuntimeError('Frozen arithmetic/boundary check failed.')
         if any(normalize_cued(text)['accepted'] for text in ('00', '数字是00', '打00', '发00')):
             raise RuntimeError('Frozen mandatory cue check failed.')
         if ctypes.sizeof(_WinApi._Input) != 40:
@@ -58,6 +61,7 @@ def run(output):
         editor.close()
         result.update(ok=True, driver_version=completed.stdout.strip(), digits='008', live_prompt_digits='9',
                       cued_digits='00', multiplication_digits='6', cue_required=True,
+                      narrative_digits='9', arithmetic_digits='14', division_digits='2', payload_boundary=True,
                       qt_clipboard_digits=editor.text(), keyboard_input_size=40)
     except Exception as error:
         result['error'] = type(error).__name__ + ': ' + str(error)

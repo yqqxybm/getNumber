@@ -174,9 +174,55 @@ class AppTests(unittest.TestCase):
         cloud.final('这件30扣一个2乘3'); self.qt.processEvents()
         self.assertEqual(['6'], self.target.writes)
 
+    def test_narrative_boundary_stops_audio_then_uses_final_recognition(self):
+        self.window.arm(); cloud = FakeCloud.instances[-1]
+        self.window.endpoint.feed(array('h', [2500] * 8000).tobytes())
+        cloud.partial('29一件飘一个9'); self.qt.processEvents()
+        self.assertTrue(self.window.collecting)
+        cloud.partial('29一件飘一个9全'); self.qt.processEvents()
+        self.assertFalse(self.window.collecting)
+        self.assertTrue(cloud.finished)
+        self.assertFalse(cloud.cancelled)
+        self.assertEqual([], self.target.writes)
+        # Even after stopping capture, the provider may correct its interim 9.
+        cloud.final('29一件飘一个8全羊毛'); self.qt.processEvents()
+        self.assertEqual(['8'], self.target.writes)
+        cloud.final('29一件飘一个8全羊毛'); self.qt.processEvents()
+        self.assertEqual(['8'], self.target.writes)
+
+    def test_arithmetic_continues_through_operators_then_stops_at_description(self):
+        self.window.arm(); cloud = FakeCloud.instances[-1]
+        self.window.endpoint.feed(array('h', [2500] * 8000).tobytes())
+        for text in ('扣2', '扣2加', '扣2加3', '扣2加3乘', '扣2加3乘4'):
+            cloud.partial(text); self.qt.processEvents()
+            self.assertTrue(self.window.collecting)
+            self.assertEqual([], self.target.writes)
+        cloud.partial('扣2加3乘4全羊毛'); self.qt.processEvents()
+        self.assertFalse(self.window.collecting)
+        self.assertTrue(cloud.finished)
+        self.assertEqual([], self.target.writes)
+        cloud.segment('扣2加3乘4全羊毛'); self.qt.processEvents()
+        self.assertEqual(['14'], self.target.writes)
+
+    def test_narrative_final_pastes_only_payload_and_invalid_math_never_writes(self):
+        for text, value in (('29一件飘一个9全羊毛', '9'), ('扣00全羊毛', '00'),
+                            ('扣2加3乘4全羊毛', '14'), ('扣9除3减1全羊毛', '2'),
+                            ('飘9或者8', '9'), ('飘一个数字9元', '9')):
+            self.window.arm(); cloud = FakeCloud.instances[-1]
+            cloud.segment(text); self.qt.processEvents()
+            self.assertTrue(self.target.writes, text)
+            self.assertEqual(value, self.target.writes[-1])
+            self.assertFalse(self.window.collecting)
+        count = len(self.target.writes)
+        for text in ('扣2乘全羊毛', '扣2加全羊毛', '扣1除0全羊毛', '扣1除2全羊毛',
+                     '扣2减3全羊毛', '扣2.5加3全羊毛'):
+            self.window.arm(); FakeCloud.instances[-1].final(text); self.qt.processEvents()
+            self.assertEqual(count, len(self.target.writes))
+            self.assertFalse(self.window.copy.isEnabled())
+
     def test_noncue_or_invalid_committed_sentences_do_not_end_round(self):
         self.window.arm(); cloud = FakeCloud.instances[-1]
-        for text in ('这件29。', '29', '扣一个', '不要扣00', '扣00或者11'):
+        for text in ('这件29。', '29', '扣一个', '不要扣00', '扣2乘'):
             cloud.segment(text); self.qt.processEvents()
             self.assertTrue(self.window.collecting)
             self.assertEqual([], self.target.writes)
@@ -224,7 +270,7 @@ class AppTests(unittest.TestCase):
 
     def test_contaminated_or_non_integer_transcript_never_fills(self):
         for text in ('12m3', '两个m', 'O08', '1.2', '负十二', '12或34', '不是123，是456',
-                     '飘一个数字9元', '不要飘一个数字9', '飘9或者8'):
+                     '不要飘一个数字9'):
             with self.subTest(text=text):
                 self.window.arm(); FakeCloud.instances[-1].final(text); self.qt.processEvents()
                 self.assertEqual([], self.target.writes)

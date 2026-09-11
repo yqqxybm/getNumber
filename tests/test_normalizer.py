@@ -2,7 +2,7 @@ import inspect
 import re
 import unittest
 
-from backend.normalizer import normalize, normalize_cued
+from backend.normalizer import has_cued_payload_boundary, normalize, normalize_cued
 
 
 class NormalizeTests(unittest.TestCase):
@@ -124,18 +124,29 @@ class NormalizeTests(unittest.TestCase):
             "这件29，扣一个00": "00",
             "这件29扣一个00": "00",
             "这件29，飘一个00。": "00",
+            "29一件飘一个9全羊毛": "9",
             "库存还剩18，扣：零0九": "009",
             "倒计时3秒，飘一个数字9": "9",
             "不要错过这件29，扣一个00": "00",
             "红色或者蓝色，飘9": "9",
             "折扣00，扣11": "11",
             "扣除成本29，飘8": "8",
+            "裙摆飘逸29，扣9全羊毛": "9",
+            "扣两个零全羊毛": "00",
+            "飘零0九羊毛衫": "009",
+            "飘9元": "9",
+            "扣9点这里": "9",
+            "扣12m3": "12",
+            "扣9或者8": "9",
+            "扣9改成8": "9",
+            "扣9再飘8": "9",
+            "扣9全羊毛下一件扣8": "9",
         }
         for spoken, expected in cases.items():
             with self.subTest(spoken=spoken):
                 self.assertAccepted(spoken, expected)
 
-    def test_cued_prompts_reject_negation_multiple_targets_and_false_cues(self):
+    def test_cued_prompts_reject_negation_and_false_cues(self):
         for spoken in (
             "不要扣00",
             "别飘9",
@@ -144,9 +155,6 @@ class NormalizeTests(unittest.TestCase):
             "禁止飘9",
             "不要，扣00",
             "这件29，不要扣00",
-            "扣00或者11",
-            "扣00再飘11",
-            "这件29，扣00元",
             "折扣00",
             "纽扣00",
             "抵扣00",
@@ -180,7 +188,6 @@ class NormalizeTests(unittest.TestCase):
             "不是扣00",
             "不要，扣00",
             "纽扣00",
-            "扣00再飘11",
         ):
             with self.subTest(spoken=spoken):
                 result = normalize_cued(spoken)
@@ -195,12 +202,51 @@ class NormalizeTests(unittest.TestCase):
                     "未检测到“扣”或“飘”口令", missing_cue["reason"]
                 )
 
-    def test_cued_multiplication_evaluates_two_complete_integer_operands(self):
+    def test_cued_payload_boundary_requires_valid_payload_and_real_tail(self):
+        self.assertEqual(
+            ["text", "min_length", "max_length"],
+            list(inspect.signature(has_cued_payload_boundary).parameters),
+        )
+        for spoken in (
+            "29一件飘一个9全羊毛",
+            "扣两个零羊毛衫",
+            "扣2乘3全羊毛",
+            "飘9元",
+            "扣9点这里",
+            "扣12m3",
+            "扣9或者8",
+            "扣9全羊毛下一件扣8",
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertTrue(has_cued_payload_boundary(spoken))
+
+        for spoken in (
+            "9全羊毛",
+            "扣9",
+            "扣9。",
+            "扣9，",
+            "扣2乘",
+            "扣2乘全羊毛",
+            "扣2.5全羊毛",
+            "扣2点5加3全羊毛",
+            "扣2点",
+            "不要扣9全羊毛",
+        ):
+            with self.subTest(spoken=spoken):
+                self.assertFalse(has_cued_payload_boundary(spoken))
+        self.assertFalse(has_cued_payload_boundary("扣9全羊毛", min_length=2))
+
+    def test_cued_arithmetic_evaluates_complete_integer_expressions(self):
         cases = {
             "这件30扣一个2乘3": "6",
             "库存18，飘二乘以3": "6",
             "扣 2 × 3": "6",
             "飘4*零": "0",
+            "扣8除以2加3乘4减去1": "15",
+            "扣2乘3乘4": "24",
+            "扣1除以2乘2全羊毛": "1",
+            "扣2乘3全羊毛": "6",
+            "扣2乘3或者4": "6",
             "扣0012": "0012",
         }
         for spoken, expected in cases.items():
@@ -208,23 +254,27 @@ class NormalizeTests(unittest.TestCase):
                 result = normalize_cued(spoken)
                 self.assertTrue(result["accepted"], result)
                 self.assertEqual(expected, result["value"])
-                if "乘" in spoken or "×" in spoken or "*" in spoken:
-                    self.assertIn("已计算乘法口令", result["changes"])
+                if any(operator in spoken for operator in "加减乘除×÷*/"):
+                    self.assertIn("已计算四则口令", result["changes"])
 
-    def test_cued_multiplication_rejects_incomplete_or_ambiguous_expressions(self):
+    def test_cued_arithmetic_rejects_incomplete_or_invalid_expressions(self):
         for spoken in (
             "扣2乘",
             "扣乘3",
-            "扣2乘3乘4",
             "扣2乘以乘3",
-            "扣2乘3元",
             "扣2.5乘3",
+            "扣2点5加3全羊毛",
+            "扣二点五加三全羊毛",
+            "扣2点",
             "扣-2乘3",
+            "扣2减3全羊毛",
+            "扣1除以0全羊毛",
+            "扣1除以2全羊毛",
+            "扣2(乘3)",
             "扣2乘three",
             "扣two乘3",
             "扣2乘threeX",
             "扣2乘两个12",
-            "扣2乘3或者4",
         ):
             with self.subTest(spoken=spoken):
                 self.assertRejected(spoken)
@@ -236,11 +286,10 @@ class NormalizeTests(unittest.TestCase):
 
     def test_live_prompts_do_not_extract_unrelated_or_ambiguous_numbers(self):
         for spoken in (
-            "飘一个数字", "飘个", "飘吧", "飘一个数字9元",
-            "飘一个数字9.9", "飘一个数字O9", "飘一个数字两个m",
-            "不要飘一个数字9", "大家别飘9", "飘9或者8", "飘9改成8",
-            "今天有9个人", "飘9再发8",
-            "飘一个数字9谢谢", "飘一个数字9可以吗", "飘两个12",
+            "飘一个数字", "飘个", "飘吧", "飘一个数字9.9",
+            "飘一个数字O9", "飘一个数字两个m",
+            "不要飘一个数字9", "大家别飘9", "今天有9个人",
+            "飘两个12",
             "飘两个数字9", "飘数字一百二", "9吧",
         ):
             with self.subTest(spoken=spoken):

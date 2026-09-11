@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QFormLayout, QDialogButtonBox, QFrame, QScrollArea,
 )
 
-from backend.normalizer import normalize_cued
+from backend.normalizer import normalize_cued, has_cued_payload_boundary
 from .cloud_api import ApiConfig, ApiError, CloudSession, test_connection
 from .session import SessionGate, Endpoint
 from .settings import PRESETS, Settings, load_settings, save_settings
@@ -261,7 +261,7 @@ class MainWindow(QMainWindow):
         self.minimum.setToolTip('已知固定长度时，两端设为相同位数。前导零也占一位。')
         self.maximum.setToolTip('长度不符会拒绝填写，不截断、不补零；前导零保留。')
         options.addWidget(self.minimum); options.addWidget(QLabel('至')); options.addWidget(self.maximum); layout.addLayout(options)
-        rules = QLabel('只取“扣 / 飘”后的数字；保留前导零，明确乘法会计算。字母、单位或歧义内容不自动填写。')
+        rules = QLabel('只取“扣 / 飘”后的数字；保留前导零，加减乘除会计算。遇其他文字就结束，不再收集后文数字。')
         rules.setObjectName('muted'); rules.setWordWrap(True); layout.addWidget(rules)
         self.preview = QCheckBox('仅预览，不自动填入（建议第一次使用时开启）'); self.preview.setChecked(self.settings.preview_only); layout.addWidget(self.preview)
         destination = QHBoxLayout(); destination.addWidget(QLabel('输出到'))
@@ -429,7 +429,7 @@ class MainWindow(QMainWindow):
 
     def _listen(self, token, config, description):
         self.endpoint = Endpoint(); self.collecting = True
-        self._set_result('正在听…'); self.original.setText('等待服务返回识别结果'); self.reason.setText('等待“扣 / 飘”后的完整数字或算式，最长收音 12 秒。'); self.copy.setEnabled(False)
+        self._set_result('正在听…'); self.original.setText('等待服务返回识别结果'); self.reason.setText('等待“扣 / 飘”后的完整数字或四则算式，最长收音 12 秒。'); self.copy.setEnabled(False)
         self.status.setText('正在听直播… ' + description)
         self._active_controls(True)
         self.cloud = CloudSession(config, lambda value: self.events.partial.emit(token, value), lambda value: self.events.final.emit(token, value), lambda value: self.events.error.emit(token, value), on_segment=lambda value: self.events.segment.emit(token, value))
@@ -513,8 +513,17 @@ class MainWindow(QMainWindow):
         self.cloud.finish()
 
     def _partial(self, token, text):
-        if self.gate.is_current(token):
-            self.original.setText('识别中：' + text[:256])
+        if not self.gate.is_current(token):
+            return
+        self.original.setText('识别中：' + text[:256])
+        options = self.active_settings
+        if self.collecting and options.protocol in ('qwen_realtime', 'dashscope_streaming') and has_cued_payload_boundary(
+            text, min_length=options.min_length, max_length=options.max_length
+        ):
+            # A following description establishes the payload's end even when
+            # the speaker never pauses. Stop capture, but let ASR finalize or
+            # correct the text before _segment/_final can perform any output.
+            self._finish_audio()
 
     def _segment(self, token, text):
         """Complete on a provider-final cue sentence, not an interim guess."""

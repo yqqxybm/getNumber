@@ -8,6 +8,7 @@ extracted from unknown text.
 
 import re
 import unicodedata
+from fractions import Fraction
 
 
 _RAW_MAX_LENGTH = 256
@@ -25,11 +26,13 @@ _LIVE_PROMPT_RE = re.compile(
 _CUED_PROMPT_RE = re.compile(
     r"(?<![折纽抵回克查])(?:飘|扣(?!除))\s*(?:[:,，]\s*)?"
     r"(?:(?:一|1)?\s*个\s*)?(?:数字\s*)?(?:[:,，]\s*)?"
-    r"(?=[0-9零〇幺一二两三四五六七八九十百千万洞拐勾]|"
-    r"(?i:zero|one|two|three|four|five|six|seven|eight|nine))"
+    r"(?=[0-9零〇幺一二两三四五六七八九十百千万洞拐勾])"
 )
 _RAW_CUED_PROMPT_RE = re.compile(r"(?<![折纽抵回克查])(?:飘|扣(?!除))")
-_MULTIPLICATION_RE = re.compile(r"乘以|乘|×|\*")
+_ARITHMETIC_OPERATOR_RE = re.compile(
+    r"加上|加|减去|减|乘以|乘|除以|除|[+\-*/×÷]"
+)
+_INVALID_EXPRESSION_TAIL = frozenset(".．()（）^%=")
 _TERMINAL_PUNCTUATION = "。！？!?；;,，"
 _INLINE_SEPARATORS = frozenset(",，、")
 _CLAUSE_PUNCTUATION = "。！？!?；;,，"
@@ -113,7 +116,7 @@ _REASON_TEXT = {
     "missing_live_command": "未检测到“扣”或“飘”口令",
     "correction_or_negation": "检测到否定或更正表达",
     "empty_payload": "未检测到口令内容",
-    "invalid_multiplication": "乘法口令不完整或有歧义",
+    "invalid_arithmetic": "四则口令不完整或有歧义",
     "ambiguous_number": "中文数字表达有歧义",
     "ambiguous_repetition": "重复表达有歧义",
     "unrecognized_payload": "包含无法识别的内容",
@@ -132,7 +135,7 @@ _CHANGE_TEXT = {
     "english_number_converted": "已转换英文数字词",
     "phone_reading_converted": "已转换电话读法",
     "repetition_expanded": "已展开重复表达",
-    "multiplication_evaluated": "已计算乘法口令",
+    "arithmetic_evaluated": "已计算四则口令",
 }
 
 
@@ -331,7 +334,7 @@ def _starts_repetition(text, index):
     return _count_phrase_end(text, index) is not None
 
 
-def _match_single_digit(text, index):
+def _match_single_digit(text, index, allow_english=True):
     if index >= len(text):
         return None
     char = text[index]
@@ -341,14 +344,21 @@ def _match_single_digit(text, index):
         return str(_CHINESE_DIGITS[char]), index + 1, "chinese_number_converted"
     if char in _PHONE_DIGITS:
         return str(_PHONE_DIGITS[char]), index + 1, "phone_reading_converted"
-    english = _match_english_digit(text, index)
-    if english is not None:
-        value, end = english
-        return value, end, "english_number_converted"
+    if allow_english:
+        english = _match_english_digit(text, index)
+        if english is not None:
+            value, end = english
+            return value, end, "english_number_converted"
     return None
 
 
-def _parse_repetition(text, index, changes):
+def _parse_repetition(
+    text,
+    index,
+    changes,
+    allow_narrative_boundary=False,
+    allow_english=True,
+):
     phrase_end = _count_phrase_end(text, index)
     if phrase_end is None:
         return None
@@ -363,7 +373,7 @@ def _parse_repetition(text, index, changes):
     atom_index = phrase_end
     while atom_index < len(text) and text[atom_index].isspace():
         atom_index += 1
-    atom = _match_single_digit(text, atom_index)
+    atom = _match_single_digit(text, atom_index, allow_english=allow_english)
     if atom is None:
         return False, index, "ambiguous_repetition"
     digit, atom_end, conversion = atom
@@ -372,7 +382,12 @@ def _parse_repetition(text, index, changes):
         has_boundary = _is_separator(text[atom_end]) or _starts_repetition(
             text, atom_end
         )
-        if not has_boundary:
+        next_is_numeric = (
+            text[atom_end].isascii() and text[atom_end].isdigit()
+        ) or text[atom_end] in _NUMBER_CHARACTERS or text[atom_end] in _PHONE_DIGITS
+        if not has_boundary and (
+            not allow_narrative_boundary or next_is_numeric
+        ):
             return False, index, "ambiguous_repetition"
 
     if conversion is not None:
@@ -448,35 +463,177 @@ def _parse_payload(text, changes):
     return "".join(output), "ok"
 
 
-def _parse_numeric_expression(text, changes):
-    operators = list(_MULTIPLICATION_RE.finditer(text))
+def _is_numeric_atom_start(text, index):
+    if index >= len(text):
+        return False
+    char = text[index]
+    return (
+        (char.isascii() and char.isdigit())
+        or char in _NUMBER_CHARACTERS
+        or char in _PHONE_DIGITS
+    )
+
+
+def _parse_payload_prefix(text, changes):
+    """Parse one maximal numeric operand and return its consumed length."""
+    output = []
+    index = 0
+    while index < len(text):
+        if _is_separator(text[index]):
+            if not output:
+                return None, "unrecognized_payload", 0
+            end = index
+            while end < len(text) and _is_separator(text[end]):
+                end += 1
+            if not _is_numeric_atom_start(text, end):
+                break
+            _add_change(changes, "separators_removed")
+            index = end
+            continue
+
+        repetition = _parse_repetition(
+            text,
+            index,
+            changes,
+            allow_narrative_boundary=True,
+            allow_english=False,
+        )
+        if repetition is not None:
+            accepted, index, value_or_reason = repetition
+            if not accepted:
+                return None, value_or_reason, 0
+            output.append(value_or_reason)
+            continue
+
+        char = text[index]
+        if char.isascii() and char.isdigit():
+            end = index + 1
+            while end < len(text) and text[end].isascii() and text[end].isdigit():
+                end += 1
+            output.append(text[index:end])
+            index = end
+            continue
+
+        if char in _NUMBER_CHARACTERS:
+            end = index + 1
+            while end < len(text) and text[end] in _NUMBER_CHARACTERS:
+                if _starts_repetition(text, end):
+                    break
+                end += 1
+            converted = _parse_chinese_number(text[index:end])
+            if converted is None:
+                return None, "ambiguous_number", 0
+            output.append(converted)
+            _add_change(changes, "chinese_number_converted")
+            index = end
+            continue
+
+        if char in _PHONE_DIGITS:
+            output.append(str(_PHONE_DIGITS[char]))
+            _add_change(changes, "phone_reading_converted")
+            index += 1
+            continue
+
+        break
+
+    if not output:
+        return None, "unrecognized_payload", 0
+    return "".join(output), "ok", index
+
+
+def _skip_expression_separators(text, index):
+    while index < len(text) and _is_separator(text[index]):
+        index += 1
+    return index
+
+
+def _canonical_operator(operator):
+    if operator in ("加", "加上", "+"):
+        return "+"
+    if operator in ("减", "减去", "-"):
+        return "-"
+    if operator in ("乘", "乘以", "*", "×"):
+        return "*"
+    return "/"
+
+
+def _evaluate_arithmetic(values, operators):
+    collapsed_values = [values[0]]
+    additive_operators = []
+    for operator, value in zip(operators, values[1:]):
+        if operator == "*":
+            collapsed_values[-1] *= value
+        elif operator == "/":
+            if value == 0:
+                return None
+            collapsed_values[-1] /= value
+        else:
+            additive_operators.append(operator)
+            collapsed_values.append(value)
+
+    result = collapsed_values[0]
+    for operator, value in zip(additive_operators, collapsed_values[1:]):
+        result = result + value if operator == "+" else result - value
+    return result
+
+
+def _has_invalid_expression_tail(text):
+    if not text:
+        return False
+    if text[0] in _INVALID_EXPRESSION_TAIL:
+        return True
+    if text[0] != "点":
+        return False
+
+    continuation = _skip_expression_separators(text, 1)
+    if continuation == len(text):
+        return True
+    return _is_numeric_atom_start(
+        text, continuation
+    ) or _ARITHMETIC_OPERATOR_RE.match(text, continuation) is not None
+
+
+def _parse_cued_expression_prefix(text, changes):
+    first, reason, consumed = _parse_payload_prefix(text, changes)
+    if first is None:
+        return None, reason, ""
+
+    raw_value = first
+    values = [Fraction(int(first))]
+    operators = []
+    position = consumed
+    while True:
+        operator_start = _skip_expression_separators(text, position)
+        operator_match = _ARITHMETIC_OPERATOR_RE.match(text, operator_start)
+        if operator_match is None:
+            break
+
+        operand_start = _skip_expression_separators(text, operator_match.end())
+        operand, operand_reason, operand_length = _parse_payload_prefix(
+            text[operand_start:], changes
+        )
+        if operand is None:
+            return None, "invalid_arithmetic", ""
+        operators.append(_canonical_operator(operator_match.group(0)))
+        values.append(Fraction(int(operand)))
+        position = operand_start + operand_length
+
+    tail = text[position:]
+    visible_tail = tail.lstrip(" \t\r\n,，、:：")
+    if _has_invalid_expression_tail(visible_tail):
+        return None, "invalid_arithmetic", ""
+
     if not operators:
-        return _parse_payload(text, changes)
-    if len(operators) != 1:
-        return None, "invalid_multiplication"
+        return raw_value, "ok", tail
+    result = _evaluate_arithmetic(values, operators)
+    if result is None or result.denominator != 1 or result.numerator < 0:
+        return None, "invalid_arithmetic", ""
+    _add_change(changes, "arithmetic_evaluated")
+    return str(result.numerator), "ok", tail
 
-    operator = operators[0]
-    left_source = text[: operator.start()].strip()
-    right_source = text[operator.end() :].strip()
-    if not left_source or not right_source:
-        return None, "invalid_multiplication"
-    if _ASCII_WORD_RE.search(left_source) or _ASCII_WORD_RE.search(right_source):
-        return None, "unrecognized_payload"
-    if (
-        left_source != text[: operator.start()]
-        or right_source != text[operator.end() :]
-    ):
-        _add_change(changes, "separators_removed")
 
-    left, left_reason = _parse_payload(left_source, changes)
-    if left is None:
-        return None, left_reason
-    right, right_reason = _parse_payload(right_source, changes)
-    if right is None:
-        return None, right_reason
-
-    _add_change(changes, "multiplication_evaluated")
-    return str(int(left) * int(right)), "ok"
+def _has_explicit_payload_tail(tail):
+    return bool(tail.lstrip(" \t\r\n。！？!?；;,，、:："))
 
 
 def _is_negated_cue(text, cue_start):
@@ -498,7 +655,7 @@ def _is_negated_cue(text, cue_start):
     return False
 
 
-def _normalize(text, min_length, max_length, require_cue):
+def _normalize(text, min_length, max_length, require_cue, boundary_sink=None):
     changes = []
     if not isinstance(text, str):
         return _result(False, "", "invalid_text_type", changes)
@@ -529,13 +686,10 @@ def _normalize(text, min_length, max_length, require_cue):
         _add_change(changes, "terminal_punctuation_removed")
     normalized = without_punctuation.rstrip()
 
-    cued_prompts = list(_CUED_PROMPT_RE.finditer(normalized))
-    if len(cued_prompts) > 1:
-        return _result(False, "", "correction_or_negation", changes)
-
+    cued_prompt = _CUED_PROMPT_RE.search(normalized)
     live_prompt = None
-    if cued_prompts:
-        live_prompt = cued_prompts[0]
+    if cued_prompt:
+        live_prompt = cued_prompt
         if _is_negated_cue(normalized, live_prompt.start()):
             return _result(False, "", "correction_or_negation", changes)
     elif not require_cue:
@@ -567,14 +721,18 @@ def _normalize(text, min_length, max_length, require_cue):
             normalized = normalized[:-1].rstrip()
         _add_change(changes, "framing_removed")
 
-    if any(marker in normalized for marker in _CORRECTION_OR_NEGATION):
+    if cued_prompt is None and any(
+        marker in normalized for marker in _CORRECTION_OR_NEGATION
+    ):
         return _result(False, "", "correction_or_negation", changes)
 
     if not normalized:
         return _result(False, "", "empty_payload", changes)
 
-    if cued_prompts:
-        value, reason = _parse_numeric_expression(normalized, changes)
+    if cued_prompt:
+        value, reason, tail = _parse_cued_expression_prefix(normalized, changes)
+        if boundary_sink is not None:
+            boundary_sink.append(_has_explicit_payload_tail(tail))
     else:
         value, reason = _parse_payload(normalized, changes)
     if value is None:
@@ -600,3 +758,18 @@ def normalize(text: str, min_length: int = 1, max_length: int = 16) -> dict:
 def normalize_cued(text: str, min_length: int = 1, max_length: int = 16) -> dict:
     """Normalize one explicit, non-negated ``扣`` or ``飘`` command."""
     return _normalize(text, min_length, max_length, require_cue=True)
+
+
+def has_cued_payload_boundary(
+    text: str, min_length: int = 1, max_length: int = 16
+) -> bool:
+    """Return whether a valid cued payload has explicit following narrative."""
+    boundary = []
+    result = _normalize(
+        text,
+        min_length,
+        max_length,
+        require_cue=True,
+        boundary_sink=boundary,
+    )
+    return result["accepted"] and boundary == [True]
